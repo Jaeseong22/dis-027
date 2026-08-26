@@ -6,9 +6,13 @@ agent2/.env
 3.공시/
 corpus/
 
-# 실행 산출물·캐시 (재생성된다)
+# 실행 산출물·캐시
+# ★ `agent2/.cache/`는 **추적한다** — 주최가 전처리 산출물도 제출 대상이라고 안내했다.
+#   정본표 2,380 · 정형공시 3,150 · PDF 표 3건 (90MB).
+#   재생성: `python3 -m agent2.warmup` + `python3 -m agent2.data.filings`
 .cache/
-agent2/.cache/
+!agent2/.cache/
+!agent2/.cache/**
 __pycache__/
 *.pyc
 .DS_Store

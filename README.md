@@ -10,6 +10,36 @@
 
 ---
 
+## 0. 평가용 API End-point
+
+```
+http://101.79.19.164/answer
+```
+
+```bash
+curl -G "http://101.79.19.164/answer" \
+     --data-urlencode "question_id=Q-001" \
+     --data-urlencode "question=삼성전자의 2025년 연결기준 매출액은?"
+```
+
+```json
+{
+  "question_id":       "Q-001",
+  "question":          "삼성전자의 2025년 연결기준 매출액은?",
+  "retrieved_context": "답변 생성에 참고한 검색 문서",
+  "think_trace":       "사고 · 추론 · 도구 사용 과정",
+  "answer":            "최종 생성 답변"
+}
+```
+
+- 경로 `/answer` 고정 · HTTP 80 · 별도 헤더나 인증 없음
+- 5필드 고정이고 값은 전부 **문자열**이다 (`agent2/contract.py`가 강제)
+- 헬스체크는 `GET /health` — `HEAD`는 501을 낸다
+- 서버: 네이버클라우드 `c2-g3a`(2 vCPU / 4 GB / 20 GB) · Ubuntu 24.04 ·
+  systemd 서비스 `gongsi` · 코퍼스는 `/data/corpus`
+
+---
+
 ## 1. 환경 구성
 
 ```bash
@@ -94,7 +124,20 @@ python3 -m agent2.loop "삼성전자 2025년 매출액은?"
 
 ---
 
-## 3. 구조
+## 3. 전처리 산출물
+
+`agent2/.cache/`에 들어 있다(저장소에 포함 · 90 MB). 서빙 전에 채워야 하고,
+없으면 첫 질의가 느려지거나 정형공시 필드가 붙지 않는다.
+
+```
+canon_tables/   정본표 2,380건    python3 -m agent2.warmup
+filings/        정형공시 3,150건  python3 -m agent2.data.filings
+pdf_tables/     PDF 표 3건        (warmup에 포함)
+```
+
+---
+
+## 4. 구조
 
 ```
 agent2/
@@ -130,7 +173,7 @@ agent2/
 
 ---
 
-## 4. 제약
+## 5. 제약
 
 - 제공 코퍼스 밖 데이터를 쓰지 않는다. 외부 API를 호출하지 않는다
   (`requests`·`socket` 의존 0 · `urllib`은 LLM 호출과 서버에만 쓴다).
