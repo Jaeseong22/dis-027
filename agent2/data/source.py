@@ -1,20 +1,4 @@
-"""문서 본문 로딩 — 폴더 안 **모든 파일**을 읽는다. 고르지 않는다.
-
-왜 전부인가(실측):
-  · 정기공시 205건이 파일 3개 구조다. 본문 XML 외 2개가
-    `(첨부)재무제표+주석` · `(첨부)연결재무제표+주석` 이고, **재고자산·판매비와관리비·
-    주당이익 주석이 거기 있다.** 본문만 읽으면 이 항목들을 놓친다.
-  · 대체수집 3건은 PDF에 내용이 있다. KB금융 [기재정정]사업보고서(2025.12)는
-    viewer.html 117,858자 vs **PDF 4,175,609자(35배)** 다.
-
-형식은 그룹마다 다르다(4,204건 전수 실측):
-  periodic  DART XML 1,051 (dart4 823 / dart3 228) + HTML 3   utf-8
-  major     DART XML 598                                       utf-8
-  exchange  **HTML 1,469 전건 · euc-kr · xforms_input**        확장자만 .xml
-  holding   DART XML 1,083                                     utf-8
-
-그래서 인코딩은 선언이 아니라 **시도 순서**(utf-8 → euc-kr → cp949)로 정한다.
-"""
+"""문서 본문 로딩 — 폴더 안 **모든 파일**을 읽는다. 고르지 않는다."""
 import os
 import subprocess
 import unicodedata
@@ -43,10 +27,7 @@ class PdfExtractionError(RuntimeError):
 
 
 def _read_pdf(path, strict=True):
-    """pdftotext(-layout, 표 정렬 보존) 우선 → pypdf 폴백.
-
-    둘 다 실패하면 `strict=True`에서 예외를 던진다(기본).
-    """
+    """pdftotext(-layout, 표 정렬 보존) 우선 → pypdf 폴백."""
     errs = []
     try:
         r = subprocess.run(["pdftotext", "-layout", "-enc", "UTF-8", path, "-"],
@@ -89,20 +70,7 @@ def kind_of(fname):
 
 
 def doc_dir(row):
-    """manifest의 `file_path` → 실제 디스크 경로. **유니코드 정규화 형태를 맞춘다.**
-
-    ★ 주최 안내(2026-08-04)와 전수 실측이 일치한다:
-        디스크 `raw/` 하위 한글 폴더명 = **NFD**(자모 분해형)
-        manifest.jsonl `file_path` · universe.csv `corp_name` = **NFC**(완성형)
-
-    macOS(APFS)는 정규화를 무시해 어느 형태로도 열리므로 **개발 중에는 안 드러난다.**
-    리눅스는 경로를 바이트 그대로 비교하므로 NFC 경로로 NFD 폴더를 못 찾는다.
-    실측: 리눅스 규칙(바이트 정확 일치)으로 맞춰보면 **70개사 중 4개만** 열린다
-    — 그대로 배포하면 66개사가 오류 없이 **조용히 빈 결과**를 낸다.
-
-    그래서 있는 그대로 → NFD → NFC 순으로 시도한다. 셋 다 없으면 원래 경로를 돌려주고
-    상위(`files`·`has_source`)의 `isdir` 검사가 정상적으로 False를 낸다.
-    """
+    """manifest의 `file_path` → 실제 디스크 경로. **유니코드 정규화 형태를 맞춘다.**"""
     fp = row.get("file_path")
     if not fp:
         return None
@@ -117,10 +85,7 @@ def doc_dir(row):
 
 
 def files(row):
-    """[(파일명, 종류, 절대경로)] — 본문 파일 목록. 내용은 읽지 않는다.
-
-    PDF 표 추출은 파일 경로가 필요해서(pdfplumber) 경로를 노출하는 진입점을 따로 둔다.
-    """
+    """[(파일명, 종류, 절대경로)] — 본문 파일 목록. 내용은 읽지 않는다."""
     d = doc_dir(row)
     if not d or not os.path.isdir(d):
         return []
@@ -152,7 +117,6 @@ def has_source(row):
     d = doc_dir(row)
     return bool(d) and os.path.isdir(d) and any(
         kind_of(f) in ("xml", "html", "pdf") for f in os.listdir(d) if not f.startswith("."))
-
 
 if __name__ == "__main__":
     from agent2.data import store

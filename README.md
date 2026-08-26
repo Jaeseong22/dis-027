@@ -40,13 +40,11 @@ cp agent2/.env.example agent2/.env
 # LLM_PROFILE=hcx  ·  CLOVA_API_KEY=<CLOVA Studio **서비스** API 키>
 ```
 
-★ **서비스 키**여야 한다(테스트 키로는 HCX-005가 안 열린다).
-★ `LLM_PROFILE` 한 줄이 없으면 조용히 다른 모델로 떨어진다. 반드시 눈으로 확인한다:
+★ **서비스 키**여야 한다(테스트 키로는 HCX-005가 안 열린다). 서빙 전에 확인한다:
 
 ```bash
 python3 -m agent2.core.llm
-#   · openai  gpt-4o-mini  …
-#   ✓ hcx     HCX-005      https://clovastudio.stream.ntruss.com/v1/openai
+#   ✓ hcx  HCX-005  https://clovastudio.stream.ntruss.com/v1/openai
 #   현재 프로필: hcx (HCX-005) — 실호출 가능
 ```
 
@@ -106,7 +104,7 @@ agent2/
 ├── loop.py          PAO 루프(Plan·Act·Observe) · SYSTEM 프롬프트
 ├── answer_spec.py   질문 유형별 답변 요건
 ├── config.py        경로·상수 (CORPUS_DIR)
-├── core/llm.py      LLM 어댑터 — OpenAI 와이어 하나에 프로필만 교체
+├── core/llm.py      LLM 어댑터 (HyperCLOVA X · 무의존 stdlib)
 ├── data/            원문 접근·정규화
 │   ├── store.py       universe / manifest / 공시목록
 │   ├── source.py      파일 읽기(인코딩·PDF)
