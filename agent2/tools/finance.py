@@ -1,9 +1,9 @@
 """재무 추출 — 개념 레지스트리 기반.
 
-**기준은 전부 표준에서 왔다.** 근거는 `agent2/research/` 참조(CLAUDE.md 근거 원칙):
-  · 개념 목록·업종 차이   `research/accounting.md`  — IAS 1.54/82, 1.55, XBRL 산업 택소노미
-  · 라벨 배열 매핑        `research/data-standards.md` — EdgarTools, XUSSS
-  · 결측 4상태·계산값 표시 `research/data-standards.md` — Compustat
+**기준은 전부 표준에서 왔다.**
+  · 개념 목록·업종 차이   IAS 1.54/82 · 1.55 · XBRL 산업 택소노미
+  · 라벨 배열 매핑        EdgarTools · XBRL US XUSSS
+  · 결측 4상태·계산값 표시 Compustat
   · as-reported 링크      같은 곳 — `Pick`·`Audit`가 그 역할
 
 **즉흥 규칙은 전부 제거했다.** 아래는 만들었다가 폐기한 것들이다. 되살리지 말 것:
@@ -80,7 +80,7 @@ def _find(table, concept):
     계층 상한은 **개념별**(`Concept.max_depth`)이다. 일괄 적용은 틀린다:
       손익 개념은 L0(소계 층)에서만 — `보험수익`(L1)을 잡으면 은행지주를 보험사로 오판.
       재무상태표는 `자산총계`가 L1, `부채총계`·`자본총계`가 L2다(실측).
-    계층은 원문 들여쓰기(U+3000)에서 온다(research/parsing.md).
+    계층은 원문 들여쓰기(U+3000)에서 온다.
     """
     if not concept.labels:
         return None
@@ -124,7 +124,7 @@ def balance_sheet(doc, consolidated=True):
 
 
 #: 손익 개념 — 어느 표가 손익 본표인지는 **이 개념들이 몇 개 있는가**로 정한다.
-#: 업종을 추측하지 않는다(IFRS 개념체계 '충실한 표현' — research/accounting.md).
+#: 업종을 추측하지 않는다(IFRS 개념체계 '충실한 표현').
 _IS_IDS = tuple(c.id for c in K.INCOME_STATEMENT + K.SECTOR_SPECIFIC
                 if c.statement == "IS" and c.labels)
 
@@ -296,7 +296,7 @@ def extract(corp, year=None, month=12, consolidated=True):
                 "identity_error": xb["identity_error"],
                 "profile": K.observed_profile(set(xb["values"])), "audit": a})
 
-    # ① 버전 전체를 본다 (research/parsing.md — 정정본이 문서 일부만 다시 내는 경우가 있다)
+    # ① 버전 전체를 본다 — 정정본이 문서 일부만 다시 내는 경우가 있다
     cands = []
     for row in sorted(docs, key=lambda r: r["rcept_dt"]):
         for doc in P.parse_doc(row):

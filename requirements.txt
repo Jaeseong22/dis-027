@@ -1,10 +1,9 @@
-# 코어는 **표준 라이브러리만** 쓴다. 아래 셋은 전부 `try:` 안의 **선택적** 의존성이라
-# 없어도 동작한다(해당 기능만 비활성). 결선 4시간 환경에서 설치 리스크를 줄이려는 설계다.
+# 코어는 표준 라이브러리만 쓴다. 아래 셋은 전부 선택적 의존성이라
+# 설치되지 않아도 동작한다(해당 기능만 비활성).
 #
-#   certifi      macOS python.org 빌드는 기본 CA가 없어 LLM HTTPS 호출이 실패한다
-#                (ssl.get_default_verify_paths().cafile is None). 없으면 시스템 CA를 쓴다.
-#   pdfplumber   정기공시 3건이 XML 없이 PDF만 있다. 없으면 그 3건의 표를 못 읽는다.
-#   pypdf        같은 3건의 텍스트 추출.
+#   certifi      기본 CA 번들이 없는 환경에서 LLM HTTPS 호출에 필요
+#   pdfplumber   XML 없이 PDF로만 제공된 정기공시 3건의 표 추출
+#   pypdf        같은 3건의 텍스트 추출
 #
 # 설치:  python3 -m pip install -r requirements.txt
 

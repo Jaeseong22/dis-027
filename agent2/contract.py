@@ -1,16 +1,15 @@
 """평가 API 계약 — 5필드 단일 진실.
 
-왜 별도 모듈인가: 계약을 **선언만** 하면 경로마다 어긋난다. 실제로 1호기에서 그 사고가 났다
-(R1 #21 — 경로별 5/6필드 비일관, HTML 오류 페이지, 커넥션 끊김). 2호기는 처음부터
-`shape()`를 단일 관문으로 두고 `validate()`로 위반을 검출한다. server·compare·테스트가
-전부 이 모듈만 본다.
+왜 별도 모듈인가: 계약을 **선언만** 하면 경로마다 어긋난다 — 실제로 그 사고를 겪었다
+(경로별 5/6필드 비일관 · HTML 오류 페이지 · 커넥션 끊김). 그래서 `shape()`를 단일 관문으로
+두고 `validate()`로 위반을 검출한다. 서버·테스트가 전부 이 모듈만 본다.
 
 계약(주최 배포 PDF):
   GET /answer?question_id=&question=
   → {question_id, question, retrieved_context, think_trace, answer}
 
-1호기 `answer()` 내부 dict엔 `evidence` 등 부가 필드가 있으나 **API 경계에서는 5필드만** 낸다.
-근거는 answer 본문·retrieved_context에 이미 포함된다(1호기와 동일 규칙 — 비교 가능성 유지).
+내부 결과 dict엔 진단 필드(`_stop`·`_calls` 등)가 더 있으나 **API 경계에서는 5필드만** 낸다.
+근거는 `answer` 본문과 `retrieved_context`에 이미 들어 있다.
 """
 
 CONTRACT = ("question_id", "question", "retrieved_context", "think_trace", "answer")

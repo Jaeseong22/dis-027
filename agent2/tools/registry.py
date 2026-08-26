@@ -28,7 +28,7 @@ _PY_JSON = {str: "string", int: "integer", float: "number", bool: "boolean",
             list: "array", dict: "object"}
 
 
-#: 도구 설명에 실을 지침의 길이 상한. 200자 이내·능동태(research/agents.md).
+#: 도구 설명에 실을 지침의 길이 상한. 200자 이내·능동태.
 GUIDE_MAX = 200
 
 

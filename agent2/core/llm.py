@@ -1,6 +1,6 @@
 """LLM 어댑터 — 개발은 OpenAI, 결선은 HyperCLOVA X. 코드는 하나다.
 
-근거 전문은 `research/llm.md`. 설계를 가른 사실 하나만 여기 옮긴다:
+설계를 가른 사실 하나:
 
   **CLOVA Studio가 OpenAI 호환 엔드포인트를 제공한다.**
   `https://clovastudio.stream.ntruss.com/v1/openai` — chat/completions·embeddings·models.
