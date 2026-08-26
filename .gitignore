@@ -1,0 +1,14 @@
+# 비밀키 — 절대 커밋 금지
+.env
+agent2/.env
+
+# 주최 제공 원문(5.2GB). 저장소에 담지 않는다 — `CORPUS_DIR`로 가리킨다.
+3.공시/
+corpus/
+
+# 실행 산출물·캐시 (재생성된다)
+.cache/
+agent2/.cache/
+__pycache__/
+*.pyc
+.DS_Store
