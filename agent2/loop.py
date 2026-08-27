@@ -804,8 +804,92 @@ def _context(evidence):
                        for i, (name, args, obs) in enumerate(evidence, 1))
 
 
+#: `retrieved_context`에서 뺄 키 — **근거가 아닌 것**.
+#:
+#:   audit    결정론 추출의 감사 로그. 값·라벨·XBRL 태그가 전부 `values`·`sources`와
+#:            중복이다(실측: `audit`에만 있는 수치는 XBRL 스케일 코드 `-6` 하나).
+#:            성격상 "사고·추론·도구 사용 과정"이므로 think_trace의 몫이다.
+#:   units    `values`의 각 문자열이 이미 단위를 달고 있다(실측 28/28 중복).
+#:   *_note   **모델에게 주는 지시문**이다("직접 계산하지 마십시오"). 채점자가 읽는
+#:            "답변 생성에 참고한 검색 문서"에 지시문이 실릴 이유가 없다.
+_PUBLIC_DROP = ("audit", "units")
+
+#: 위에서 따로 렌더하므로 일반 키 순회에서 제외한다.
+_PUBLIC_SHOWN = ("출처", "scope", "period", "unit", "values", "series", "sources", "status")
+
+
+def _is_note(k):
+    return k.endswith("_note") or k == "note"
+
+
+def _public_obs(obs):
+    """관측 → 사람이 읽는 근거. **값은 하나도 버리지 않는다.**
+
+    `retrieved_context`는 계약상 "답변 생성에 참고한 검색 문서"이고 채점 축은
+    근거 완전성(필수 데이터가 검색 근거에 포함됐는가)이다. 그런데 이 필드는
+    내부 관측 문자열을 그대로 실어 왔다 — JSON 덤프에 모델용 지시문과 추출
+    디버그 로그까지 섞여 나갔다(실측 10,332자 중 근거가 아닌 것 18.6%).
+
+    아는 모양은 표로 펴고, **모르는 키는 그대로 싣는다** — 도구가 12종이고
+    관측 모양이 제각각이라 화이트리스트로 만들면 기본값이 '버림'이 된다(§6-2).
+    파싱이 안 되면(절단 등) 원문을 그대로 돌려준다.
+    """
+    if not isinstance(obs, str):
+        obs = str(obs)
+    try:
+        d = json.loads(obs)
+    except (ValueError, TypeError):
+        return obs
+    if not isinstance(d, dict):
+        return obs
+
+    out = []
+    if d.get("출처"):
+        out.append(f"    출처   {d['출처']}")
+    unit = f"단위 {d['unit']}" if d.get("unit") else None
+    scope = " · ".join(x for x in (d.get("scope"), d.get("period"), unit) if x)
+    if scope:
+        out.append(f"    기준   {scope}")
+
+    src = d.get("sources") if isinstance(d.get("sources"), dict) else {}
+    vals = d.get("values")
+    if isinstance(vals, dict) and vals:
+        out.append("    값")
+        for k, v in vals.items():
+            out.append(f"      {v}   {src.get(k, k)}".rstrip())
+    elif vals is not None:
+        out.append("    값   " + json.dumps(vals, ensure_ascii=False))
+
+    ser = d.get("series")
+    if isinstance(ser, dict) and ser:
+        out.append("    추이")
+        for k, v in ser.items():
+            line = " → ".join(f"{y} {x}" for y, x in v.items()) if isinstance(v, dict) \
+                   else json.dumps(v, ensure_ascii=False)
+            out.append(f"      {src.get(k, k)}  {line}")
+    elif ser is not None:
+        out.append("    추이   " + json.dumps(ser, ensure_ascii=False))
+
+    # 남은 키는 **하나도 버리지 않는다**. 근거가 아닌 것만 위 상수로 명시해 뺀다.
+    for k, v in d.items():
+        if k in _PUBLIC_DROP or k in _PUBLIC_SHOWN or _is_note(k):
+            continue
+        out.append(f"    {k}   " + (json.dumps(v, ensure_ascii=False)
+                                    if isinstance(v, (dict, list)) else str(v)))
+    if src and not isinstance(vals, dict):
+        out.append("    sources   " + json.dumps(src, ensure_ascii=False))
+    return "\n".join(out) if out else obs
+
+
+def _public_context(evidence):
+    """`retrieved_context` 필드용. 가드가 보는 `_context`(전체)와 **분리**한다 —
+    검증은 관측 전체를 봐야 하고, 채점자는 근거만 보면 된다."""
+    return "\n\n".join(f"[{i}] {name}({_args(args)})\n{_public_obs(obs)}"
+                       for i, (name, args, obs) in enumerate(evidence, 1))
+
+
 def _result(question, question_id, answer, evidence, trace, stop, step, budget, llm, audit):
-    ctx = _context(evidence)
+    ctx = _public_context(evidence)
     think = _format_trace(trace)
     if audit.computation or audit.entries:
         think += ("\n\n── 감사 로그 " + "─" * 40 + "\n") + audit.render()
