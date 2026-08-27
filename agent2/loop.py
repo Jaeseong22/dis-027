@@ -823,7 +823,7 @@ def _is_note(k):
     return k.endswith("_note") or k == "note"
 
 
-def _public_obs(obs):
+def _public_obs(obs, keep=None):
     """관측 → 사람이 읽는 근거. **값은 하나도 버리지 않는다.**
 
     `retrieved_context`는 계약상 "답변 생성에 참고한 검색 문서"이고 채점 축은
@@ -856,12 +856,14 @@ def _public_obs(obs):
     src = d.get("sources") if isinstance(d.get("sources"), dict) else {}
     vals = d.get("values")
     ser = d.get("series")
-    out += _value_table(vals, ser, src)
+    out += _value_table(vals, ser, src, keep)
 
     # 남은 키는 **하나도 버리지 않는다**. 근거가 아닌 것만 위 상수로 명시해 뺀다.
     for k, v in d.items():
         if k in _PUBLIC_DROP or k in _PUBLIC_SHOWN or _is_note(k):
             continue
+        if keep and isinstance(v, (dict, list)) and not _hit(json.dumps(v, ensure_ascii=False), keep):
+            continue        # 답변이 안 쓴 부속 블록(비율표 등)
         if isinstance(v, dict) and v and all(not isinstance(x, (dict, list)) for x in v.values()):
             out.append(f"    {k}   " + " · ".join(f"{a} {b}" for a, b in v.items()))
         else:
@@ -902,6 +904,37 @@ def _pad(s, n, right=False):
     return (gap + s) if right else (s + gap)
 
 
+def _answer_nums(answer):
+    """답변이 실제로 인용한 수치(정규화). `retrieved_context`를 여기에 맞춰 좁힌다.
+
+    `think_trace`가 도구 호출과 관측 요약을 이미 보여 주므로, 이 필드는
+    **답 도출에 쓰인 근거**만 담는 편이 읽힌다. 연도·서수처럼 대조가 무의미한 수는
+    뺀다(`claims._skip_num`과 같은 규칙) — 안 빼면 "2025"가 모든 행을 살린다.
+    """
+    out = set()
+    for v, u, _st in claims._numbers(answer or ""):
+        if claims._skip_num(v, u):
+            continue
+        out.add(round(abs(v), 6))
+    return out
+
+
+def _hit(text, keep):
+    """이 줄이 답변이 인용한 수치를 담고 있나. 배율 차이(원↔백만원)도 인정한다."""
+    if not keep:
+        return True
+    for m in _re.finditer(r"-?\d[\d,]*(?:\.\d+)?", text):
+        try:
+            v = abs(float(m.group().replace(",", "")))
+        except ValueError:
+            continue
+        for sc in (1, 1e3, 1e6, 1e9, 1e12):
+            for c in keep:
+                if abs(v * sc - c) <= max(1.0, c * 1e-9) or abs(v / sc - c) <= max(1e-6, c * 1e-9):
+                    return True
+    return False
+
+
 def _grouped(vals):
     """재무제표 묶음 순서로 항목을 낸다. 묶음에 없는 개념은 뒤에 그대로 붙인다."""
     order = {cid: i for i, (_n, ids) in enumerate(_GROUPS) for cid in ids}
@@ -909,7 +942,7 @@ def _grouped(vals):
     return [(k, vals[k]) for k in keys]
 
 
-def _value_table(vals, ser, src):
+def _value_table(vals, ser, src, keep=None):
     """`values`와 `series`를 **한 표로** 합친다.
 
     합쳐도 되는 근거: `values[k]`가 `series[k]`의 최신연도 값과 같다
@@ -969,6 +1002,13 @@ def _value_table(vals, ser, src):
         rows = [(lb, [c[: -len(common)].rstrip() if c.endswith(" " + common) else c
                       for c in cells], g) for lb, cells, g in rows]
 
+    # ★ 답변이 인용한 행만 남긴다. 하나도 안 걸리면 **전부** 남긴다(추측하지 않는다).
+    total_rows = len(rows)
+    if keep:
+        hit = [r for r in rows if _hit(" ".join(r[1]), keep)]
+        if hit:
+            rows = hit
+
     cols = [str(y) for y in years] or ["값"]
     # ★ 열 폭은 **내용에서** 잡는다. 고정 폭으로 뒀더니 `1,083,335,531,792`(17자)가
     #   옆 칸과 붙어(`…909,8891,083,…`) 값 두 개가 한 수로 읽혔다.
@@ -986,6 +1026,11 @@ def _value_table(vals, ser, src):
             cur_g = g
         out.append("      " + _pad(label, w)
                    + "".join(_pad(c, cw[i], right=True) for i, c in enumerate(cells)))
+    if total_rows > len(rows):
+        out.append(f"    ({total_rows}개 항목 중 답변이 인용한 {len(rows)}개만 표시 — "
+                   f"나머지는 think_trace의 도구 관측에 있습니다)")
+    _labels = {r[0] for r in rows}
+    tags = [t for t in tags if t.split("=", 1)[0] in _labels] or tags
     if tags:
         # 접두사(`ifrs-full_`·`dart_`)는 전 항목이 공유한다 — 라벨당 한 번씩 적을 이유가 없다.
         short = [t.replace("=ifrs-full_", "=").replace("=dart_", "=dart:") for t in tags]
@@ -1000,15 +1045,28 @@ def _value_table(vals, ser, src):
     return out
 
 
-def _public_context(evidence):
+def _public_context(evidence, answer=""):
     """`retrieved_context` 필드용. 가드가 보는 `_context`(전체)와 **분리**한다 —
-    검증은 관측 전체를 봐야 하고, 채점자는 근거만 보면 된다."""
-    return "\n\n".join(f"[{i}] {name}({_args(args)})\n{_public_obs(obs)}"
-                       for i, (name, args, obs) in enumerate(evidence, 1))
+    검증은 관측 전체를 봐야 하고, 채점자는 **답 도출에 쓰인 근거**만 보면 된다.
+    경로 전체는 `think_trace`가 이미 보여 준다.
+
+    같은 (도구, 인자)로 두 번 부른 관측은 한 번만 싣는다 — 루프가 같은 경로를
+    다시 타면 같은 문서가 두 번 이상 들어간다.
+    """
+    keep = _answer_nums(answer)
+    out, seen, i = [], set(), 0
+    for name, args, obs in evidence:
+        k = _key(name, args)
+        if k in seen:
+            continue
+        seen.add(k)
+        i += 1
+        out.append(f"[{i}] {name}({_args(args)})\n{_public_obs(obs, keep)}")
+    return "\n\n".join(out)
 
 
 def _result(question, question_id, answer, evidence, trace, stop, step, budget, llm, audit):
-    ctx = _public_context(evidence)
+    ctx = _public_context(evidence, answer)
     think = _format_trace(trace)
     if audit.computation or audit.entries:
         think += ("\n\n── 감사 로그 " + "─" * 40 + "\n") + audit.render()
