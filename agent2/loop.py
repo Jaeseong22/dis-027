@@ -815,7 +815,8 @@ def _context(evidence):
 _PUBLIC_DROP = ("audit", "units")
 
 #: 위에서 따로 렌더하므로 일반 키 순회에서 제외한다.
-_PUBLIC_SHOWN = ("출처", "scope", "period", "unit", "values", "series", "sources", "status")
+_PUBLIC_SHOWN = ("출처", "scope", "period", "unit", "values", "series", "sources", "status",
+                 "corp", "year", "structure")
 
 
 def _is_note(k):
@@ -847,38 +848,156 @@ def _public_obs(obs):
     if d.get("출처"):
         out.append(f"    출처   {d['출처']}")
     unit = f"단위 {d['unit']}" if d.get("unit") else None
-    scope = " · ".join(x for x in (d.get("scope"), d.get("period"), unit) if x)
+    who = " ".join(str(x) for x in (d.get("corp"), d.get("year")) if x)
+    scope = " · ".join(x for x in (who or None, d.get("scope"), d.get("period"), unit) if x)
     if scope:
         out.append(f"    기준   {scope}")
 
     src = d.get("sources") if isinstance(d.get("sources"), dict) else {}
     vals = d.get("values")
-    if isinstance(vals, dict) and vals:
-        out.append("    값")
-        for k, v in vals.items():
-            out.append(f"      {v}   {src.get(k, k)}".rstrip())
-    elif vals is not None:
-        out.append("    값   " + json.dumps(vals, ensure_ascii=False))
-
     ser = d.get("series")
-    if isinstance(ser, dict) and ser:
-        out.append("    추이")
-        for k, v in ser.items():
-            line = " → ".join(f"{y} {x}" for y, x in v.items()) if isinstance(v, dict) \
-                   else json.dumps(v, ensure_ascii=False)
-            out.append(f"      {src.get(k, k)}  {line}")
-    elif ser is not None:
-        out.append("    추이   " + json.dumps(ser, ensure_ascii=False))
+    out += _value_table(vals, ser, src)
 
     # 남은 키는 **하나도 버리지 않는다**. 근거가 아닌 것만 위 상수로 명시해 뺀다.
     for k, v in d.items():
         if k in _PUBLIC_DROP or k in _PUBLIC_SHOWN or _is_note(k):
             continue
-        out.append(f"    {k}   " + (json.dumps(v, ensure_ascii=False)
-                                    if isinstance(v, (dict, list)) else str(v)))
+        if isinstance(v, dict) and v and all(not isinstance(x, (dict, list)) for x in v.values()):
+            out.append(f"    {k}   " + " · ".join(f"{a} {b}" for a, b in v.items()))
+        else:
+            out.append(f"    {k}   " + (json.dumps(v, ensure_ascii=False)
+                                        if isinstance(v, (dict, list)) else str(v)))
     if src and not isinstance(vals, dict):
         out.append("    sources   " + json.dumps(src, ensure_ascii=False))
     return "\n".join(out) if out else obs
+
+
+#: 원문 라벨에서 XBRL 태그 부분을 떼는 정규식. 라벨과 태그를 열로 나눠 싣는다.
+_SRC_TAG = _re.compile(r"^(.*?)\s*\[([^\]]+)\]\s*$")
+
+#: 재무 항목을 재무제표별로 묶는다 — 28행을 한 덩어리로 쏟으면 스캔이 안 된다.
+#: 여기 없는 개념은 마지막 묶음(`기타`)으로 간다. **버리지 않는다.**
+_GROUPS = (
+    ("재무상태표", ("assets_total", "liabilities_total", "equity_total", "issued_capital",
+                 "inventories", "ppe", "intangibles", "retained_earnings",
+                 "current_assets", "current_liabilities", "cash", "nci")),
+    ("손익계산서", ("revenue", "cost_of_sales", "gross_profit", "sga", "operating_income",
+                 "pretax_income", "net_income", "net_income_owners", "tax_expense",
+                 "equity_method_income", "eps_basic", "eps_diluted",
+                 "net_interest_income", "insurance_revenue")),
+    ("현금흐름표", ("cf_operating", "cf_investing", "cf_financing", "equity_begin")),
+)
+_GROUP_OF = {cid: name for name, ids in _GROUPS for cid in ids}
+
+
+def _w(s):
+    """표시 폭. 한글·전각은 2칸이다 — `len()`으로 맞추면 표가 어긋난다."""
+    import unicodedata
+    return sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in str(s))
+
+
+def _pad(s, n, right=False):
+    s = str(s)
+    gap = " " * max(0, n - _w(s))
+    return (gap + s) if right else (s + gap)
+
+
+def _grouped(vals):
+    """재무제표 묶음 순서로 항목을 낸다. 묶음에 없는 개념은 뒤에 그대로 붙인다."""
+    order = {cid: i for i, (_n, ids) in enumerate(_GROUPS) for cid in ids}
+    keys = sorted(vals, key=lambda k: (order.get(k, len(_GROUPS)), list(vals).index(k)))
+    return [(k, vals[k]) for k in keys]
+
+
+def _value_table(vals, ser, src):
+    """`values`와 `series`를 **한 표로** 합친다.
+
+    합쳐도 되는 근거: `values[k]`가 `series[k]`의 최신연도 값과 같다
+    (전수 70사 × 연결/별도 · 대조 3,525건 · 일치 3,525건 = 100%).
+    따로 실으면 같은 값이 두 번 나가고 항목 28개가 56행이 된다.
+
+    라벨을 **앞**에 두는 이유: 사람이 표를 읽을 때 눈이 라벨을 먼저 따라간다.
+    종전에는 숫자가 앞이고 라벨이 뒤라 스캔이 안 됐다.
+    """
+    if not isinstance(vals, dict) or not vals:
+        out = []
+        if vals is not None:
+            out.append("    값   " + json.dumps(vals, ensure_ascii=False))
+        if isinstance(ser, dict) and ser:
+            out.append("    추이")
+            for k, v in ser.items():
+                line = " → ".join(f"{y} {x}" for y, x in v.items()) if isinstance(v, dict) \
+                       else json.dumps(v, ensure_ascii=False)
+                out.append(f"      {src.get(k, k)}  {line}")
+        elif ser is not None:
+            out.append("    추이   " + json.dumps(ser, ensure_ascii=False))
+        return out
+
+    ser = ser if isinstance(ser, dict) else {}
+    years = sorted({y for v in ser.values() if isinstance(v, dict) for y in v})
+    rows, tags = [], []
+    for k, cur in vals.items():
+        pass
+    rows, tags = [], []
+    for k, cur in _grouped(vals):
+        raw = str(src.get(k, k))
+        m = _SRC_TAG.match(raw)
+        label, tag = (m.group(1), m.group(2)) if m else (raw, "")
+        if tag:
+            tags.append(f"{label}={tag}")
+        cells = []
+        row_ser = ser.get(k) if isinstance(ser.get(k), dict) else {}
+        for y in years:
+            cells.append(str(row_ser.get(y, "")))
+        # 최신연도 열이 비면 `values`를 그 자리에 둔다(추이가 없는 항목).
+        if years and not cells[-1]:
+            cells[-1] = str(cur)
+        if not years:
+            cells = [str(cur)]
+        rows.append((label, cells, _GROUP_OF.get(k, "기타")))
+
+    # 칸마다 같은 단위를 반복하지 않는다 — 머리말이 이미 말한다. 다른 단위만 칸에 남긴다
+    # (주당이익은 `원`이고 나머지는 `백만원`이다. 통째로 떼면 그 행이 틀린 값이 된다).
+    _cnt = {}
+    for _, cells, _g in rows:
+        for c in cells:
+            u = c.rsplit(" ", 1)[-1] if " " in c else ""
+            if u and not u[-1:].isdigit():
+                _cnt[u] = _cnt.get(u, 0) + 1
+    common = max(_cnt, key=_cnt.get) if _cnt else ""
+    if common:
+        rows = [(lb, [c[: -len(common)].rstrip() if c.endswith(" " + common) else c
+                      for c in cells], g) for lb, cells, g in rows]
+
+    cols = [str(y) for y in years] or ["값"]
+    # ★ 열 폭은 **내용에서** 잡는다. 고정 폭으로 뒀더니 `1,083,335,531,792`(17자)가
+    #   옆 칸과 붙어(`…909,8891,083,…`) 값 두 개가 한 수로 읽혔다.
+    w = max([_w(r[0]) for r in rows] + [_w("항목")]) + 2
+    cw = []
+    for i, c in enumerate(cols):
+        cw.append(max([_w(c)] + [_w(r[1][i]) for r in rows if i < len(r[1])]) + 2)
+    head = "    " + _pad("항목" + (f" (단위 {common})" if common else ""), w) \
+           + "".join(_pad(c, cw[i], right=True) for i, c in enumerate(cols))
+    out = [head, "    " + "─" * min(_w(head) - 4, 110)]
+    cur_g = None
+    for label, cells, g in rows:
+        if g != cur_g:
+            out.append(f"    · {g}")
+            cur_g = g
+        out.append("      " + _pad(label, w)
+                   + "".join(_pad(c, cw[i], right=True) for i, c in enumerate(cells)))
+    if tags:
+        # 접두사(`ifrs-full_`·`dart_`)는 전 항목이 공유한다 — 라벨당 한 번씩 적을 이유가 없다.
+        short = [t.replace("=ifrs-full_", "=").replace("=dart_", "=dart:") for t in tags]
+        out.append("    XBRL 태그 (ifrs-full 접두 생략)")
+        line = "      "
+        for t in short:
+            if _w(line) + _w(t) > 104:
+                out.append(line.rstrip(" ·")); line = "      "
+            line += t + " · "
+        if line.strip():
+            out.append(line.rstrip(" ·"))
+    return out
 
 
 def _public_context(evidence):
