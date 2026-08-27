@@ -1100,21 +1100,38 @@ def _growth_base(concept):
     return None
 
 
-#: 정본표 경로에도 증감률을 코드가 계산해 붙일지. `A2_CANON_GROWTH=0`이면 끈다.
+#: 정본표 경로에도 **증감률을 코드가 계산해** 붙일지. `A2_CANON_GROWTH=0`이면 끈다.
 #:
-#: 표준 개념(`revenue` 등)에는 `전년대비증감률`을 이미 주는데 정본표 개념(`수주잔고` 등)에는
-#: 원값만 줬다. 줄 값이 없으면 모델이 직접 나누고, 그 결과가 틀린다(실측: 23.32% ←
-#: 정확히는 23.2368%, 45.76% ← 45.4709%). 수치는 결정론 코드가 계산한다는 원칙의 누락이었다.
+#: 왜 — `financial_series`는 표준 개념(`revenue` 등)에는 `전년대비증감률`을 이미 주는데
+#: **정본표 개념(`수주잔고` 등)에는 원값만** 줬다. 그러면 `SYSTEM` 규칙 5가
+#: *"수치는 도구가 계산합니다"*라고 지시해도 모델은 줄 게 없어 직접 나눈다 —
+#: §6-31(금지만 적지 말고 대체 지시를 함께 적어라)의 값 버전이다.
 #:
-#: 전수(기업 70 × 정본표 34 = 2,380쌍): 두 해 연속 확보 1,549쌍 중 행·열이 맞아
-#: 계산 가능한 것 1,166쌍(75.3%). A/B diff — 새 수치 6,445개 · 사라진 수치 0 ·
-#: 관측 길이 +273(중앙)/+588(최대).
+#: 실측된 피해(r53 다중-18/HD현대일렉트릭):
+#:     원값만 줌 → 모델이 (9,423,400−7,646,580)÷7,646,580 을 직접 계산
+#:     모델 답변 **23.32%** · 정확한 값 **23.2368%** · 엘에스일렉트릭도 45.76% vs 45.4709%
+#:     판정은 둘 다 O였다(텍스트형이라 기업명만 맞으면 통과) — 주최 평가지표 1
+#:     `수치·비교(증감)가 정확한가`에는 그대로 걸린다.
+#:
+#: 실현 가능성(전수: 기업 70 × 정본표 34 = 2,380쌍):
+#:     두 해 연속 확보 1,549쌍 · 그중 행·열이 맞아 계산 가능 **1,166쌍(75.3%)**
+#:     계산 가능한 셀 47,860개 · 표당 추가 문자 중앙 272자(상위 8행 상한)
 _CANON_GROWTH = _os.environ.get("A2_CANON_GROWTH", "1") != "0"
 
-#: 증감률을 몇 행까지 실을지. 관측 예산 상한.
+#: 증감률을 몇 행까지 실을지. 관측 예산을 먹지 않도록 상한을 건다(§6-14).
 _CANON_GROWTH_MAX = 8
 
 _CANON_NUM = _re.compile(r"^\(?-?[\d,]+(?:\.\d+)?\)?$")
+
+#: 열 이름에 박힌 기준일·기간. 연도 간 열을 맞추려면 떼야 한다.
+#:   `당기말 수주잔(2025.12.31)` ↔ `당기말 수주잔(2024.12.31)` 은 같은 열이다.
+#:   떼지 않으면 열이 해마다 달라져 증감률을 하나도 못 만든다(효성중공업 실측).
+_CANON_COLDATE = _re.compile(r"\s*[(（][^()（）]*(?:19|20)\d\d[^()（）]*[)）]")
+
+
+def _canon_col(name):
+    """연도 간 비교용 열 키. 기준일 괄호와 공백을 지운다."""
+    return _CANON_COLDATE.sub("", str(name)).strip()
 
 
 def _canon_num(x):
@@ -1134,28 +1151,68 @@ def _canon_num(x):
     return -v if neg else v
 
 
-def _canon_growth(got):
-    """정본표 연도별 결과 → {`행 · 열`: 증감률}. 최신 두 해만 본다.
+#: 열 이름의 기간 표지. `전기말 수주잔` ↔ `당기말 수주잔` 을 같은 항목으로 묶는다.
+_CANON_PRIOR = ("전전기말", "전전기", "전기말", "전기", "기초잔액", "기초", "전년말", "전년", "직전")
+_CANON_CUR   = ("당기말", "당기", "기말잔액", "기말", "금기말", "금기", "당분기말", "당분기")
 
-    행은 라벨로 맞춘다 — 위치로 맞추면 다른 항목의 증감률을 지어내게 된다.
-    열도 이름으로 맞추고 양쪽 다 수치인 것만 계산한다. 전기가 0이면 정의되지 않는다.
+
+def _canon_period(name):
+    """열 이름 → (기간표지, 항목명). 표지가 없으면 (None, 원래이름)."""
+    t = _canon_col(name)
+    for m in _CANON_PRIOR:
+        if t.startswith(m):
+            return "prior", t[len(m):].strip(" ·-")
+    for m in _CANON_CUR:
+        if t.startswith(m):
+            return "cur", t[len(m):].strip(" ·-")
+    return None, t
+
+
+def _canon_growth(got):
+    """정본표 → {`행 · 항목`: 전년대비 증감률}. **최신 보고서 한 장 안에서만** 계산한다.
+
+    ★★ 보고서를 가로질러 비교하면 틀린다(2026-08-28 실측). 최신 보고서는 전기 수치를
+    **재작성**하는 경우가 있어 같은 날짜의 값이 보고서마다 다르다:
+
+        2024년 사업보고서  중공업·효성중공업(주) 당기말 수주잔(2024.12.31) =  5,680,878
+        2025년 사업보고서  중공업·효성중공업(주) 전기말 수주잔(2024.12.31) = 10,711,892
+
+    두 보고서를 가로질러 계산하면 +170.0%가 나오는데 실제는 +43.2%다. 그래서 최신
+    보고서가 **자기 안에** 담은 전기/당기 열끼리만 비교한다. 그 표를 만든 회사가
+    같은 기준으로 나란히 적어 둔 값이므로 재작성 위험이 없다.
+
+    검산(효성중공업 2025 사업보고서): 전기말 중공업 10,711,892 + 건설 5,679,766 =
+    16,391,658 · 당기말 15,340,242 + 5,518,255 = 20,858,497 — 사람이 확정한 정답과 일치한다.
+
+    전기 열이 없는 표는 증감률을 만들지 않는다. 지어내지 않는 편이 낫다.
     """
-    if not _CANON_GROWTH or len(got) < 2:
+    if not _CANON_GROWTH or not got:
         return {}
-    prev, cur = got[-2], got[-1]
-    if prev.get("year") is None or cur.get("year") != prev["year"] + 1:
-        return {}                      # 연속한 두 해가 아니면 전년 대비가 아니다
-    pr = {r.get("label"): (r.get("values") or {}) for r in prev.get("rows") or [] if r.get("label")}
-    out = {}
+    cur = got[-1]
+    out, seen = {}, set()
     for row in cur.get("rows") or []:
         lb = row.get("label")
-        if not lb or lb not in pr:
+        if not lb:
             continue
-        for col, now in (row.get("values") or {}).items():
-            b, a = _canon_num(pr[lb].get(col)), _canon_num(now)
+        pairs = {}
+        for col, val in (row.get("values") or {}).items():
+            kind, base = _canon_period(col)
+            if not kind:
+                continue
+            # 열 이름이 정확히 `기초`/`기말`이면 항목명이 빈 문자열이 된다.
+            # 흔한 형태라(유형자산 증감표 등) 건너뛰면 통째로 못 잡는다.
+            pairs.setdefault(base or "잔액", {})[kind] = val
+        for base, kv in pairs.items():
+            b, a = _canon_num(kv.get("prior")), _canon_num(kv.get("cur"))
             if b in (None, 0) or a is None:
                 continue
-            out[f"{lb} · {col}"] = _pct_str(_compute.run("growth", a, b))
+            # 원문의 병합 셀(rowspan)로 같은 부문 합계가 여러 행에 퍼진다 —
+            # 같은 (항목, 전기, 당기)는 한 번만 싣는다(상한을 헛되이 쓰지 않는다).
+            sig = (base, b, a)
+            if sig in seen:
+                continue
+            seen.add(sig)
+            out[f"{lb} · {base}"] = _pct_str(_compute.run("growth", a, b))
             if len(out) >= _CANON_GROWTH_MAX:
                 return out
     return out
@@ -1212,7 +1269,16 @@ def financial_series(corp: str, concept: str, years: int = 3) -> dict:
                          "최신연도": got[-1]["year"]}
                 if _g and _size(_base) + _size(_g) + 120 > _config.OBS_LIMIT:
                     _g = {}
-                return {"개념": concept, "표": tids[0], "연도별": got,
+                # 표준 개념 분기는 출처를 주는데 이 분기만 안 줬다 — 값을 얻고 근거를
+                # 잃는 교환은 하지 않는다(실측 A/B에서 접수번호를 잃었다).
+                _fr0 = _finance.extract(nm, year=None)
+                _c0 = (_doctables._cite({"report_nm": _fr0.get("period"),
+                                         "rcept_no": _fr0.get("rcept_no"),
+                                         "is_correction": _fr0.get("is_correction")})
+                       if _fr0.get("rcept_no") else None)
+                return {"개념": concept, "표": tids[0],
+                        **({"출처": _c0} if _c0 else {}),
+                        "연도별": got,
                         **({"전년대비증감률": _g,
                             "증감률_note": "위 증감률은 **코드가 계산한 값**입니다"
                                           f"({got[-2]['year']}년 → {got[-1]['year']}년, "
