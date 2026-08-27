@@ -593,7 +593,8 @@ def run(question, llm=None, budget=None, question_id="", audit=None,
                     obs = _render(out)
                     gained += 1
                     evidence.append((tc.name, _a, obs))
-                    trace.append(f"스텝 {step}: {tc.name}({_args(_a)}) → {_head(obs)}")
+                    trace.append(f"스텝 {step}: {tc.name}({_args(_a)})"
+                                 + _obs_summary(obs))
             # 호환 문서가 snake_case를 명시한다. 네이티브 v3는 toolCallId — 전환일 재확인 대상.
             messages.append({"role": "tool", "tool_call_id": tc.id,
                              "name": tc.name, "content": obs})
@@ -663,9 +664,129 @@ def run(question, llm=None, budget=None, question_id="", audit=None,
     if rep.get("blocked"):
         stop = "ungrounded"
 
+    # 근거 공시 표시. 모델이 옮겨 적지 않으면 관측의 `출처`를 그대로 붙인다.
+    answer, _n_cite = _cite_fallback(answer, evidence, blocked=bool(rep.get("blocked")))
+    if _n_cite:
+        trace.append(f"근거표시: 답변에 근거가 없어 관측의 출처 {_n_cite}건을 덧붙였다")
+
     trace.append(f"정지[{stop}] {STOP.get(stop, ('미상', '미상'))[0]} · {budget.report(step, llm)}")
     return _result(question, question_id, answer, evidence, trace, stop,
                    step, budget, llm, audit)
+
+
+#: 답변에 이미 근거 공시가 표시됐는지 — 접수번호 14자리로 본다.
+#: `\b`를 쓰면 안 된다: 한글도 `\w`라 "…20260318001672입니다"에서 단어경계가 없다.
+_HAS_CITE = _re.compile(r"(?<!\d)\d{14}(?!\d)")
+
+#: 관측(JSON 렌더)에서 `출처` 값만 꺼낸다. `출처_note`는 키가 달라 걸리지 않고,
+#: 관측이 잘려 닫는 따옴표가 없으면 매치되지 않는다(반쪽 출처를 쓰지 않는다).
+_OBS_CITE = _re.compile(r'"출처"\s*:\s*"([^"\\]{4,200})"')
+
+#: 한 답변에 붙일 출처 개수 상한.
+_CITE_MAX = 3
+
+
+def _cite_fallback(answer, evidence, blocked=False):
+    """답변에 근거 공시 표시가 없으면 관측의 `출처`를 그대로 덧붙인다.
+
+    요구사항은 "모든 답변에는 근거 공시를 표시할 것"이고 형식은 공시명·공시일이다.
+    `SYSTEM` 규칙 10이 도구가 준 `출처`를 그대로 적으라고 지시하지만 지켜지지 않는다 —
+    관측이 출처를 주는 비율 80.1%에 대해 답변이 옮겨 적는 비율은 43.3%다(실측 201문항).
+    도구 쪽에 출처를 더 실어도 이 비율은 움직이지 않았으므로, 사후 부착으로 보완한다.
+
+    새 조회도 추론도 하지 않는다. `retrieved_context`에 그대로 있는 문자열만 옮기므로
+    근거 가드의 대조 대상과 어긋나지 않는다.
+
+    안 붙이는 경우: 답변에 이미 접수번호가 있다 · 가드가 차단했다 · 관측에 출처가 없다.
+    """
+    if blocked or not (answer or "").strip():
+        return answer, 0
+    if _HAS_CITE.search(answer):
+        return answer, 0
+    srcs = []
+    for _name, _a, obs in evidence:
+        for src in _OBS_CITE.findall(obs if isinstance(obs, str) else str(obs)):
+            src = src.strip()
+            if src and src not in srcs:
+                srcs.append(src)
+    if not srcs:
+        return answer, 0
+    srcs = srcs[:_CITE_MAX]
+    return answer.rstrip() + "\n\n(근거: " + " · ".join(srcs) + ")", len(srcs)
+
+
+#: think_trace 절 구분 — 접두어로 분류한다. 순서는 바꾸지 않고 절이 바뀔 때만 머리말을 넣는다.
+#: 기계용 첫 줄(`[route=…]`)과 `스텝 N: 도구(` 접두는 유지한다 — 진입점과 계약 검사가 읽는다.
+_TRACE_SECTIONS = (
+    ("질의 해석", ("질의:", "요건:")),
+    ("근거 수집", ("스텝 ", "마무리", "LLM 오류", "도구오류", "완료게이트")),
+    ("검증",      ("근거가드", "근거표시", "요건 보완")),
+    ("종료",      ("정지[",)),
+)
+
+
+def _section_of(line):
+    for name, prefixes in _TRACE_SECTIONS:
+        if line.startswith(prefixes):
+            return name
+    return None
+
+
+def _format_trace(trace):
+    """평평한 trace 목록 → 절로 묶인 형태. 순서는 바꾸지 않는다."""
+    out, cur = [], None
+    for line in trace:
+        sec = _section_of(line) or cur or "근거 수집"
+        if sec != cur:
+            out.append(("" if not out else "\n") + f"── {sec} " + "─" * max(0, 46 - len(sec)))
+            cur = sec
+        out.append(line)
+    return "\n".join(out)
+
+
+#: 관측 요약에 실을 값의 개수.
+_OBS_KEYS = 4
+
+
+def _obs_summary(obs):
+    """관측 → "무엇을 얻었는가" 한 줄.
+
+    JSON 앞 80자만 실으면 그 스텝에서 무슨 근거를 얻었는지가 보이지 않는다.
+    관측은 `_render`가 만든 JSON 문자열이므로, 파싱되면 출처와 핵심 값을 뽑고
+    잘려서 파싱이 안 되면 앞부분을 싣되 잘렸다고 밝힌다(조용한 손실 금지).
+    """
+    if not isinstance(obs, str):
+        obs = str(obs)
+    if obs.startswith(("오류:", "None (", "이미 같은 인자로")):
+        return " → " + _head(obs, 110)
+    try:
+        d = json.loads(obs)
+    except (ValueError, TypeError):
+        return " → " + _head(obs, 110) + "  (관측이 잘려 요약 불가)"
+    if not isinstance(d, dict):
+        return " → " + _head(obs, 110)
+
+    bits = []
+    if d.get("출처"):
+        bits.append(f"출처 {d['출처']}")
+    scope = d.get("scope") or d.get("표") or d.get("개념") or d.get("table")
+    if scope:
+        bits.append(f"범위 {scope}")
+    got = d.get("values")
+    if isinstance(got, dict) and got:
+        head = " · ".join(f"{k} {v}" for k, v in list(got.items())[:_OBS_KEYS])
+        more = f" … (총 {len(got)}개 항목)" if len(got) > _OBS_KEYS else ""
+        bits.append("획득 " + head + more)
+    else:
+        rows = d.get("rows") or d.get("연도별") or d.get("목록")
+        if isinstance(rows, list):
+            bits.append(f"획득 {len(rows)}행")
+        elif d.get("계수") is not None:
+            bits.append(f"획득 계수 {d['계수']}")
+        else:
+            keys = [k for k in d if not k.startswith("_")][:6]
+            bits.append("획득 " + ", ".join(keys) if keys else "획득 없음")
+    return "\n        " + "\n        ".join(bits)
 
 
 def _args(d):
@@ -685,9 +806,9 @@ def _context(evidence):
 
 def _result(question, question_id, answer, evidence, trace, stop, step, budget, llm, audit):
     ctx = _context(evidence)
-    think = "\n".join(trace)
+    think = _format_trace(trace)
     if audit.computation or audit.entries:
-        think += "\n\n--- 감사 ---\n" + audit.render()
+        think += ("\n\n── 감사 로그 " + "─" * 40 + "\n") + audit.render()
     r = Result({
         "question_id": str(question_id or ""),
         "question": question,
