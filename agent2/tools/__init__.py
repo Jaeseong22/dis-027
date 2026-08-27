@@ -1100,6 +1100,67 @@ def _growth_base(concept):
     return None
 
 
+#: 정본표 경로에도 증감률을 코드가 계산해 붙일지. `A2_CANON_GROWTH=0`이면 끈다.
+#:
+#: 표준 개념(`revenue` 등)에는 `전년대비증감률`을 이미 주는데 정본표 개념(`수주잔고` 등)에는
+#: 원값만 줬다. 줄 값이 없으면 모델이 직접 나누고, 그 결과가 틀린다(실측: 23.32% ←
+#: 정확히는 23.2368%, 45.76% ← 45.4709%). 수치는 결정론 코드가 계산한다는 원칙의 누락이었다.
+#:
+#: 전수(기업 70 × 정본표 34 = 2,380쌍): 두 해 연속 확보 1,549쌍 중 행·열이 맞아
+#: 계산 가능한 것 1,166쌍(75.3%). A/B diff — 새 수치 6,445개 · 사라진 수치 0 ·
+#: 관측 길이 +273(중앙)/+588(최대).
+_CANON_GROWTH = _os.environ.get("A2_CANON_GROWTH", "1") != "0"
+
+#: 증감률을 몇 행까지 실을지. 관측 예산 상한.
+_CANON_GROWTH_MAX = 8
+
+_CANON_NUM = _re.compile(r"^\(?-?[\d,]+(?:\.\d+)?\)?$")
+
+
+def _canon_num(x):
+    """정본표 셀 → 수치. 괄호는 음수(회계 표기). 수치가 아니면 None."""
+    if not isinstance(x, str):
+        return None
+    t = x.strip()
+    if not _CANON_NUM.match(t):
+        return None
+    body = t.replace(",", "")
+    neg = body.startswith("(") and body.endswith(")")
+    body = body.strip("()")
+    try:
+        v = float(body)
+    except ValueError:
+        return None
+    return -v if neg else v
+
+
+def _canon_growth(got):
+    """정본표 연도별 결과 → {`행 · 열`: 증감률}. 최신 두 해만 본다.
+
+    행은 라벨로 맞춘다 — 위치로 맞추면 다른 항목의 증감률을 지어내게 된다.
+    열도 이름으로 맞추고 양쪽 다 수치인 것만 계산한다. 전기가 0이면 정의되지 않는다.
+    """
+    if not _CANON_GROWTH or len(got) < 2:
+        return {}
+    prev, cur = got[-2], got[-1]
+    if prev.get("year") is None or cur.get("year") != prev["year"] + 1:
+        return {}                      # 연속한 두 해가 아니면 전년 대비가 아니다
+    pr = {r.get("label"): (r.get("values") or {}) for r in prev.get("rows") or [] if r.get("label")}
+    out = {}
+    for row in cur.get("rows") or []:
+        lb = row.get("label")
+        if not lb or lb not in pr:
+            continue
+        for col, now in (row.get("values") or {}).items():
+            b, a = _canon_num(pr[lb].get(col)), _canon_num(now)
+            if b in (None, 0) or a is None:
+                continue
+            out[f"{lb} · {col}"] = _pct_str(_compute.run("growth", a, b))
+            if len(out) >= _CANON_GROWTH_MAX:
+                return out
+    return out
+
+
 @tool("1-4", "1-18", "2-6")
 
 
@@ -1143,7 +1204,20 @@ def financial_series(corp: str, concept: str, years: int = 3) -> dict:
                 got.append({"year": y, "table": v["table"], "unit": v["unit"],
                             "unit_note": v["unit_note"], "rows": keys[:8]})
             if got:
+                # 키 순서는 표준 개념 경로와 같게 둔다 — 삽입 순서가 곧 관측 순서다.
+                _g = _canon_growth(got)
+                # 관측 상한을 넘길 자리면 붙이지 않는다. 무조건 붙였더니 이미 잘리고 있던
+                # 관측 6건에서 절단 경계가 밀려 수치가 하나씩 사라졌다(전수 A/B).
+                _base = {"개념": concept, "표": tids[0], "연도별": got,
+                         "최신연도": got[-1]["year"]}
+                if _g and _size(_base) + _size(_g) + 120 > _config.OBS_LIMIT:
+                    _g = {}
                 return {"개념": concept, "표": tids[0], "연도별": got,
+                        **({"전년대비증감률": _g,
+                            "증감률_note": "위 증감률은 **코드가 계산한 값**입니다"
+                                          f"({got[-2]['year']}년 → {got[-1]['year']}년, "
+                                          "(당기−전기)÷전기×100). 직접 계산하지 마십시오."}
+                           if _g else {}),
                         "최신연도": got[-1]["year"],
                         "note": "각 연도의 사업보고서에서 같은 표를 읽은 것입니다. "
                                 "열 이름에 역년이 함께 있으니 그대로 쓰십시오."}
