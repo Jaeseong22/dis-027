@@ -38,6 +38,53 @@ curl -G "http://101.79.19.164/answer" \
 - 서버: 네이버클라우드 `c2-g3a`(2 vCPU / 4 GB / 20 GB) · Ubuntu 24.04 ·
   systemd 서비스 `gongsi` · 코퍼스는 `/data/corpus`
 
+### 배포 구성 (재현용)
+
+운영 중인 서비스 정의다. `/etc/systemd/system/gongsi.service`:
+
+```ini
+[Unit]
+Description=공시 Agent 평가 API
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/gongsi
+Environment=PYTHONUNBUFFERED=1
+Environment=CORPUS_DIR=/data/corpus
+Environment=MALLOC_ARENA_MAX=2
+
+ExecStartPre=/bin/sh -c 'test -s /opt/gongsi/agent2/.cache/filings/records.jsonl || /opt/gongsi/venv/bin/python -m agent2.data.filings'
+ExecStart=/opt/gongsi/venv/bin/python -m agent2.server 80
+
+Restart=always
+RestartSec=10
+TimeoutStartSec=1800
+
+[Install]
+WantedBy=multi-user.target
+```
+
+| 항목 | 값 | 왜 |
+|---|---|---|
+| 코드 | `/opt/gongsi` | 저장소를 그대로 배치 |
+| 코퍼스 | `/data/corpus` | 5.2GB라 저장소 밖. `CORPUS_DIR`이 유일한 연결점 |
+| 파이썬 | `/opt/gongsi/venv/bin/python` | **시스템 `python3`가 아니다.** 수동 실행 시 같은 것을 써야 한다 |
+| `MALLOC_ARENA_MAX=2` | glibc 아레나 제한 | 메모리 4GB에 상주 2GB·피크 2.4GB라 아레나 파편화를 막는다 |
+| `ExecStartPre` | 정형공시 배치 | 캐시가 비었을 때만 돈다. 정본표 예열은 `server.serve()`가 포트를 열기 **전에** 한다 |
+| `TimeoutStartSec=1800` | 30분 | 콜드 예열이 기동 안에 들어가므로 기본 90초로는 모자란다 |
+| `Restart=always` | — | 장애 시 자동 복구 |
+
+`EnvironmentFile`은 쓰지 않는다. LLM 자격증명과 프로필은 `/opt/gongsi/agent2/.env`를
+`agent2/config.py:load_env()`가 읽는다. **이 파일은 저장소에 없다**(비밀키).
+없으면 `core/llm.py`가 자격증명 없음으로 답하고 다른 제공자로 넘어가지 않는다.
+
+수동으로 무언가를 돌릴 때는 환경변수를 직접 줘야 한다 — systemd 것은 셸에 상속되지 않는다:
+
+```bash
+cd /opt/gongsi && CORPUS_DIR=/data/corpus venv/bin/python -m agent2.warmup --check
+```
+
 ---
 
 ## 1. 환경 구성
