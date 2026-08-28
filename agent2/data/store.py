@@ -86,24 +86,97 @@ def _strip_eng_suffix(s):
     return t
 
 
+#: 한국 법인 상용구. 전치(`주식회사 카카오`)·후치(`네이버(주)`) 둘 다 쓰인다.
+_KR_FORM = re.compile(r"주식회사|\(주\)|㈜|\(유\)|유한회사")
+
+
+def _strip_kr_form(k):
+    """정규화된 키에서 법인 상용구를 뗀다."""
+    return _KR_FORM.sub("", k)
+
+
+#: DART 서식이 문서 머리에 넣는 **회사가 스스로 밝힌 상호**.
+#:     <COMPANY-NAME AREGCIK="00266961">네이버(주)</COMPANY-NAME>
+_COMPANY_NAME = re.compile(r"<COMPANY-NAME\b[^>]*>(.*?)</COMPANY-NAME>", re.S | re.I)
+_TAG_IN = re.compile(r"<[^>]+>")
+_HEAD_BYTES = 4096
+
+
 @lru_cache(maxsize=1)
+def _filed_names():
+    """{corp_name: (원문이 쓴 상호, …)} — `<COMPANY-NAME>` 전수.
+
+    `네이버`·`포스코홀딩스`가 해소되지 않아 **코퍼스에 있는 회사를 "없는 기업"으로**
+    답했다. DART 서식이 문서마다 구조화 필드로 상호를 싣고 `AREGCIK`(=corp_code)로
+    universe 와 조인된다 — 매핑을 지어내지 않는다.
+
+    전수 실측: XML 문서 3,147건 전부가 이 필드를 갖는다(4,616 − 거래소 HTML 1,469).
+    조인 70/70사 · 고유 표기 186종 · 새로 붙는 키 31개 · 충돌 4축 전부 0건.
+    정정본·과거 문서까지 보므로 구 사명도 잡힌다(삼성엔지니어링→삼성E&A ·
+    대우조선해양→한화오션 · 엘아이지넥스원→LIG디펜스… · 현대중공업→HD현대중공업).
+    ★ `OCI(주)`는 인적분할 전 법인명이라 `oci`가 OCI홀딩스로 간다. 신설 OCI는
+      코퍼스 밖이므로 그쪽을 물으면 이 매핑이 다른 회사를 준다.
+
+    비용: 문서당 앞 4KB만 읽어 전수 0.3초. 그래서 생성 파일로 빼지 않는다.
+    """
+    from agent2.data import source          # 순환 import 회피 — source 가 store 를 쓴다
+    out = {}
+    for row in manifest():
+        try:
+            fs = source.files(row)
+        except Exception:
+            continue
+        for _fn, kind, path in fs:
+            if kind != "xml":
+                continue
+            try:
+                with open(path, encoding="utf-8", errors="ignore") as fh:
+                    head = fh.read(_HEAD_BYTES)
+            except OSError:
+                break
+            for v in _COMPANY_NAME.findall(head):
+                nm = nfc(_TAG_IN.sub("", v)).strip()
+                if nm:
+                    out.setdefault(row["corp_name"], set()).add(nm)
+            break                            # 문서당 본문 한 개면 충분하다
+    return {k: tuple(sorted(v)) for k, v in out.items()}
 
 
+@lru_cache(maxsize=1)
 def _corp_index():
-    """법인명·통용명·영문명(+접미사 제거)·종목코드·법인코드 → 마스터 행."""
+    """법인명·통용명·영문명(+접미사 제거)·종목코드·법인코드·**원문 상호** → 마스터 행.
+
+    ★ 순서가 곧 우선순위다 — universe 가 준 이름을 먼저 넣고 원문 상호를 뒤에 붙인다.
+    """
     idx = {}
     for r in universe():
         for key in (r["corp_name"], r["listed_name"], r["corp_eng_name"],
                     _strip_eng_suffix(r["corp_eng_name"]),
                     r["stock_code"], r["corp_code"]):
-            if key and len(_norm(key)) >= 2:
-                idx.setdefault(_norm(key), r)
+            if not key:
+                continue
+            for k in (_norm(key), _strip_kr_form(_norm(key))):
+                if len(k) >= 2:
+                    idx.setdefault(k, r)
+    for corp, names in _filed_names().items():
+        r = idx.get(_norm(corp))
+        if r is None:
+            continue
+        for nm in names:
+            k = _strip_kr_form(_norm(nm))
+            if len(k) >= 2:
+                idx.setdefault(k, r)
     return idx
 
 
 def resolve_corp(q):
-    """기업 해소. 못 찾으면 None(억지로 채우지 않는다)."""
-    return _corp_index().get(_norm(q))
+    """기업 해소. 못 찾으면 None(억지로 채우지 않는다).
+
+    질의 쪽에서도 법인 상용구를 뗀다 — `(주)이마트`·`주식회사 카카오`로 물어도 걸린다.
+    """
+    idx = _corp_index()
+    k = _norm(q)
+    return idx.get(k) or idx.get(_strip_kr_form(k))
 
 
 def docs(corp=None, doc_group=None, doc_subtype=None, base_year=None,
