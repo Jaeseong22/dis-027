@@ -559,10 +559,43 @@ def get_financials(corp: str, year: int = None, month: int = 12,
     cite = _doctables._cite({"report_nm": r.get("period"), "rcept_no": r.get("rcept_no"),
                              "is_correction": r.get("is_correction")}) \
         if r.get("rcept_no") else None
+    # 분기·반기는 손익이 3개월과 누적 두 벌로 실린다(IAS 34.20은 누적이 필수).
+    # 질문이 "3분기 매출"이라고만 하면 둘 중 무엇인지 갈리므로 둘 다 주고 밝히게 한다.
+    # ★ 지시문은 SYSTEM 이 아니라 도구 note 에 둔다 — SYSTEM 은 지시가 지시를 밀어낸다.
+    spans, span_note = {}, None
+    _m = r.get("month") or month
+    if r.get("spans") and _m in (6, 9):     # 1분기는 3개월 ≡ 누적이라 갈릴 것이 없다
+        _q = {6: ("4~6월", "1~6월"), 9: ("7~9월", "1~9월")}[_m]
+        spans = {k: {f"해당 분기(3개월 · {_q[0]})": _money_str(v.get("3개월"), cunits.get(k)),
+                     f"누적({_q[1]})": _money_str(v.get("누적"), cunits.get(k))}
+                 for k, v in r["spans"].items()}
+        span_note = (f"※ 위 values 는 **누적({_q[1]})** 기준입니다. 이 보고서는 손익·"
+                     f"현금흐름을 **해당 분기(3개월 · {_q[0]})**와 **누적** 두 가지로 "
+                     "싣고, 위 `기간구분`에 둘 다 담았습니다. **답변에 어느 기준인지 "
+                     "반드시 밝히고**, 끝에 '해당 분기(3개월) 기준과 누적 기준 중 어느 "
+                     "쪽을 원하시는지 알려주시면 그 기준으로 다시 답변드리겠습니다'라고 "
+                     "확인 질문을 덧붙이십시오.")
     return {"corp": r.get("corp"), "year": r.get("year"), "period": r.get("period"),
             **({"출처": cite} if cite else {}),
             "scope": scope,
-            "scope_note": f"※ {scope} 기준",
+            # 연결/별도를 질문이 안 밝히면 우리가 정한 것이다 — 정했으면 밝히고 되묻는다.
+            "scope_note": f"※ {scope} 기준입니다. 질문이 연결/별도를 밝히지 않았다면 "
+                          f"답변에 '{scope} 기준'임을 적고, 끝에 '별도(개별) 기준이 "
+                          "필요하시면 말씀해 주십시오'라고 덧붙이십시오."
+                          if scope == "연결" else f"※ {scope} 기준입니다.",
+            **({"기간구분": spans, "기간구분_note": span_note} if spans else {}),
+            # 사업연도를 질문이 안 밝혀 우리가 최신으로 정한 경우.
+            **({"기간_note": f"※ 질문이 사업연도를 지정하지 않아 코퍼스의 최신 보고서"
+                            f"({r.get('period')})로 답했습니다. 답변에 그 사실을 적고, "
+                            "끝에 '다른 사업연도를 원하시면 말씀해 주십시오'라고 "
+                            "덧붙이십시오."}
+               if r.get("year_inferred") else {}),
+            # 4분기 단독 보고서는 코퍼스에 없다(정기공시 base_month 는 3·6·9·12뿐).
+            **({"4분기_note": "※ 4분기만의 수치를 담은 보고서는 공시에 없습니다"
+                             "(정기공시는 1분기·반기·3분기·사업보고서 넷뿐입니다). "
+                             "사업보고서 값은 **연간 누적**입니다. 4분기 단독을 물어오면 "
+                             "그 사실을 고지하십시오."}
+               if _m == 12 else {}),
             "unit": unit,
             "values": shown,
             **({"재무구조_비율": struct,

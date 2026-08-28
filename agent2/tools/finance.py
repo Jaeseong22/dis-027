@@ -108,20 +108,35 @@ def income_statement(doc, consolidated=True):
 # ----------------------------------------------------------------- XBRL 우선 경로
 
 
-def _from_xbrl(corp_name, year, consolidated, subtype, a):
-    """XBRL 태그에서 뽑는다. 값이 부족하면 None을 돌려 라벨 파서로 넘긴다."""
-    if subtype != "annual":          # 분기·반기 문서의 컨텍스트 접두사는 미검증 — 넘기지 않는다
-        return None
-    fs = xbrl.facts(corp_name, year, doc_subtype=subtype)
+def _from_xbrl(corp_name, year, consolidated, subtype, a, month=12):
+    """XBRL 태그에서 뽑는다. 값이 부족하면 None을 돌려 라벨 파서로 넘긴다.
+
+    ★ 분기·반기도 이 경로를 쓴다. 종전에는 컨텍스트 접두사가 미검증이라 막아 두었는데
+      전수로 닫았다(`xbrl._SPAN`). 막아 둔 대가로 `net_income`이 분기 49/70사 ·
+      반기 55/70사에서 NOT_FOUND 였다. XBRL 태그는 2025년 이후 분기·반기에만 붙으므로
+      라벨 파서 폴백은 그대로 남긴다.
+    """
+    fs = xbrl.facts(corp_name, year, doc_subtype=subtype, base_month=month)
     if not fs:
         return None
     scope = xbrl.CONSOLIDATED if consolidated else xbrl.SEPARATE
     if scope not in xbrl.scopes(fs):
         return None
 
+    # 분기·반기 손익은 3개월과 누적이 나란히 실린다. `values`에는 누적을 싣는다 —
+    # IAS 34.20이 누적을 필수로 요구하고 3개월은 선택 표시다. 두 값 다 `spans`로 낸다.
+    # 1분기는 3개월 ≡ 누적이라 되물을 것이 없어 `spans`를 만들지 않는다.
+    flow = None if subtype == "annual" else xbrl.CUMULATIVE
+    other = xbrl.THREE_MONTH if (flow and month != 3) else None
+
     values, krw, labels, series, status, codes, units = {}, {}, {}, {}, {}, {}, {}
+    spans = {}
     for cid in xbrl.CONCEPTS:
-        f = xbrl.pick(fs, cid, scope, year)
+        sp = xbrl.span_for(cid, flow)
+        f = xbrl.pick(fs, cid, scope, year, sp)
+        if f is None and sp:
+            # 그 기간 구분으로 못 찾으면 구분 없이 한 번 더 본다(회사가 한 열만 낸 경우).
+            f = xbrl.pick(fs, cid, scope, year)
         if f is None:
             # 회사가 표시하지 않은 항목은 **생략**이 정상이다(XBRL 결측 규칙).
             status[cid] = (K.NOT_FOUND if cid in K.REQUIRED_ALL else K.NOT_APPLICABLE)
@@ -137,7 +152,11 @@ def _from_xbrl(corp_name, year, consolidated, subtype, a):
                1e8: "억원", 1e12: "조원"}.get(round(scale), "원")
         units[cid] = P.Unit(tokens=(raw,), scale=scale, currency="KRW",
                             kind="krw", raw=f"(단위: {raw})")
-        series[cid] = xbrl.series(fs, cid, scope)
+        series[cid] = xbrl.series(fs, cid, scope, xbrl.span_for(cid, flow))
+        if other and cid not in xbrl._INSTANT:
+            g = xbrl.pick(fs, cid, scope, year, other)
+            if g is not None and g.value != f.value:
+                spans[cid] = {xbrl.THREE_MONTH: g.value, xbrl.CUMULATIVE: f.value}
         a.accept(f.value, "Exact_Match", f"{cid} ← {f.code} [{scope}] {f.label[:20]}",
                  f"XBRL {f.decimals or 'INF'}")
 
@@ -149,6 +168,7 @@ def _from_xbrl(corp_name, year, consolidated, subtype, a):
         compute.verify("자산=부채+자본", idn[2] + idn[3], idn[1], audit=a)
     return {"values": values, "krw": krw, "labels": labels, "codes": codes,
             "units": units, "series": series, "status": status, "scope": scope,
+            "spans": spans, "span": flow,
             "via": "xbrl",
             "identity_error": None if idn is None else idn[0]}
 
@@ -187,8 +207,15 @@ def extract(corp, year=None, month=12, consolidated=True):
         a.reject(corp, "Entity_Mismatch", "코퍼스 70개사에서 식별 불가")
         return {"corp": corp, "values": {}, "status": {}, "profile": None, "audit": a}
 
-    year = year or store.latest_fiscal_year(c["corp_name"])
     subtype = {12: "annual", 6: "half"}.get(month, "quarter")
+    # ★ 최신 연도는 **그 보고서 종류·그 분기**에서 얻는다. `latest_fiscal_year`는 annual
+    #   전용(=2025)이라, `year` 생략 + `month=3` 이면 2026년 1분기를 물어도 2025.03을 열었다.
+    year_inferred = year is None
+    if year is None:
+        ys = [r["base_year"] for r in store.docs(corp=c["corp_name"],
+                                                 doc_subtype=subtype, base_month=month)
+              if r.get("base_year")]
+        year = max(ys) if ys else store.latest_fiscal_year(c["corp_name"])
     docs = store.docs(corp=c["corp_name"], doc_subtype=subtype,
                       base_year=year, base_month=month)
     if not docs:
@@ -197,7 +224,7 @@ def extract(corp, year=None, month=12, consolidated=True):
                 "profile": None, "audit": a}
 
     # ⓪ XBRL 태그 우선. 없거나 부족하면 아래 라벨 파서로 폴백한다(교체가 아니라 상위 경로).
-    xb = _from_xbrl(c["corp_name"], year, consolidated, subtype, a)
+    xb = _from_xbrl(c["corp_name"], year, consolidated, subtype, a, month)
     if xb is not None:
         doc_row = sorted(docs, key=lambda r: r["rcept_dt"])[-1]
         return _abs_costs({"corp": c["corp_name"], "year": year, "month": month,
@@ -207,7 +234,8 @@ def extract(corp, year=None, month=12, consolidated=True):
                 "rcept_no": doc_row.get("rcept_no"),
                 "is_correction": bool(doc_row.get("is_correction")),
                 "values": xb["values"], "krw": xb["krw"], "units": xb["units"],
-                "labels": xb["labels"],
+                "labels": xb["labels"], "spans": xb["spans"], "span": xb["span"],
+                "year_inferred": year_inferred,
                 "codes": xb["codes"], "series": xb["series"], "status": xb["status"],
                 "identity_error": xb["identity_error"],
                 "profile": K.observed_profile(set(xb["values"])), "audit": a})
@@ -303,7 +331,8 @@ def extract(corp, year=None, month=12, consolidated=True):
             "period": is_pick["row"]["report_nm"], "doc_id": is_pick["row"]["doc_id"],
             "rcept_no": is_pick["row"].get("rcept_no"),
             "is_correction": bool(is_pick["row"].get("is_correction")),
-            "values": values, "units": units, "status": status, "audit": a})
+            "values": values, "units": units, "status": status,
+            "year_inferred": year_inferred, "audit": a})
 
 
 def series(corp, concept_id, years=3, month=12, consolidated=True):

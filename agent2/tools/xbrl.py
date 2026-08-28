@@ -13,14 +13,27 @@ _TAG = re.compile(r"<[^>]+>")
 _ROW = re.compile(r"<TR[^>]*>(.*?)</TR>", re.S)
 _TEXT = re.compile(r"<T[EDU][^>]*>(.*?)</T[EDU]>", re.S)
 
-_CTX = re.compile(r"^(C|P|BP)FY(\d{4})([de])")
+_CTX = re.compile(r"^(C|P|BP)FY(\d{4})([de])([A-Z]*)")
+
+#: ACONTEXT 기간 접두사 → 기간 구분. 전 코퍼스 실측(periodic 1,466파일 · 예외 0건):
+#:   base_month=12 → FY / 6 → HY·HYA·HYQ / 3 → FQ·FQA·FQQ / 9 → TQ·TQA·TQQ
+#: 분기·반기는 같은 행에 3개월(…Q)과 누적(…A)이 나란히 실린다. 1분기는 둘이 같다.
+CUMULATIVE = "누적"
+THREE_MONTH = "3개월"
+INSTANT = "시점"
+ANNUAL = "연간"
+_SPAN = {"FY": ANNUAL, "": None,
+         "HY": INSTANT, "HYA": CUMULATIVE, "HYQ": THREE_MONTH,
+         "FQ": INSTANT, "FQA": CUMULATIVE, "FQQ": THREE_MONTH,
+         "TQ": INSTANT, "TQA": CUMULATIVE, "TQQ": THREE_MONTH}
 
 CONSOLIDATED = "연결"
 SEPARATE = "별도"
 UNSPECIFIED = "미표기"
 
-Fact = namedtuple("Fact", "code label scope year kind value krw decimals negated raw ctx",
-                  defaults=("",))
+Fact = namedtuple("Fact",
+                  "code label scope year kind value krw decimals negated raw ctx span",
+                  defaults=("", None))
 
 # ---------------------------------------------------------------- 개념 사전
 #: 개념 → 코드 **배열**(우선순위 순). 앞엣것이 먼저 채택된다.
@@ -126,14 +139,25 @@ def _scope_of(ctx):
 
 
 def _period_of(ctx):
+    """ACONTEXT → (연도, 기간/시점, 기간구분)."""
     m = _CTX.match(ctx or "")
-    return (int(m.group(2)), m.group(3)) if m else (None, None)
+    if not m:
+        return (None, None, None)
+    return (int(m.group(2)), m.group(3), _SPAN.get(m.group(4)))
 
 
-def facts(corp, year=None, doc_subtype="annual"):
-    """기업의 해당 보고서에서 XBRL 사실을 전부 뽑는다. 빈 튜플이면 태그가 없는 문서다."""
-    docs = list(store.docs(corp=corp, doc_subtype=doc_subtype, base_year=year)) \
-        if year else list(store.docs(corp=corp, doc_subtype=doc_subtype))
+def facts(corp, year=None, doc_subtype="annual", base_month=None):
+    """기업의 해당 보고서에서 XBRL 사실을 전부 뽑는다. 빈 튜플이면 태그가 없는 문서다.
+
+    ★ `base_month`를 넘겨라. `doc_subtype="quarter"`는 1분기와 3분기를 둘 다 뜻해서,
+      월을 안 주면 두 문서의 사실이 섞여 `pick`이 1분기 값을 3분기 답으로 돌려준다.
+    """
+    kw = {"corp": corp, "doc_subtype": doc_subtype}
+    if year:
+        kw["base_year"] = year
+    if base_month is not None:
+        kw["base_month"] = base_month
+    docs = list(store.docs(**kw))
     if not docs:
         return ()
     text = "\n".join(source.text(d) for d in docs)
@@ -159,20 +183,20 @@ def facts_of_text(text):
             v = _num(val)
             if v is None:
                 continue
-            yr, kind = _period_of(ctx)
+            yr, kind, span = _period_of(ctx)
             sc = _scale(a.get("ADECIMAL"))
             out.append(Fact(code=code, label=label, scope=_scope_of(ctx), year=yr,
                             kind=kind, value=v, krw=v * sc, decimals=a.get("ADECIMAL"),
                             negated=a.get("ANEGATED") == "Y",
-                            raw=_TAG.sub("", val).strip(), ctx=ctx))
+                            raw=_TAG.sub("", val).strip(), ctx=ctx, span=span))
     return tuple(out)
 
 # ---------------------------------------------------------------- 조회
 
 
-def pick(fs, concept, scope=CONSOLIDATED, year=None):
+def pick(fs, concept, scope=CONSOLIDATED, year=None, span=None):
     """개념 1건 → Fact. 코드 배열 순서대로 찾고, 먼저 걸리는 코드를 쓴다."""
-    cs = candidates(fs, concept, scope, year)
+    cs = candidates(fs, concept, scope, year, span)
     if not cs:
         return None
     if year is None:
@@ -209,8 +233,11 @@ def dim_count(ctx):
     return sum(1 for a in _AXIS.findall(ctx or "") if _SCOPE_AXIS not in a)
 
 
-def candidates(fs, concept, scope=CONSOLIDATED, year=None):
-    """해당 개념에 걸리는 Fact 전부 — 코드 우선순위 순, **합계 사실이 먼저** 온다."""
+def candidates(fs, concept, scope=CONSOLIDATED, year=None, span=None):
+    """해당 개념에 걸리는 Fact 전부 — 코드 우선순위 순, **합계 사실이 먼저** 온다.
+
+    `span`을 주면 그 기간 구분만 남긴다(분기·반기의 3개월/누적을 가른다).
+    """
     codes = CONCEPTS.get(concept)
     if not codes:
         raise KeyError(f"미등록 개념: {concept} — CONCEPTS에 코드 배열을 먼저 정의할 것")
@@ -225,6 +252,8 @@ def candidates(fs, concept, scope=CONSOLIDATED, year=None):
             if scope and f.scope != scope:
                 continue
             if year and f.year != year:
+                continue
+            if span and f.span != span:
                 continue
             if must and not must.search(f.label or ""):
                 continue
@@ -290,13 +319,23 @@ def scale_conflict(fs, concept, scope=CONSOLIDATED, year=None):
     return False, None
 
 
-def series(fs, concept, scope=CONSOLIDATED):
-    """{연도: 값} — 한 보고서에 당기·전기·전전기가 함께 실려 있어 3개년이 한 번에 나온다."""
+def series(fs, concept, scope=CONSOLIDATED, span=None):
+    """{연도: 값} — 한 보고서에 당기·전기·전전기가 함께 실려 있어 3개년이 한 번에 나온다.
+
+    ★ 분기·반기에서는 `span`을 줘야 연도끼리 기준이 어긋나지 않는다.
+    """
     out = {}
-    for f in candidates(fs, concept, scope, year=None):
+    for f in candidates(fs, concept, scope, year=None, span=span):
         if f.year is not None and f.year not in out:
             out[f.year] = f.value
     return dict(sorted(out.items()))
+
+
+def span_for(concept, flow_span):
+    """개념 하나에 적용할 기간 구분. 재무상태표 개념은 **시점**이라 흐름 구분이 없다."""
+    if flow_span is None:
+        return None
+    return INSTANT if concept in _INSTANT else flow_span
 
 
 def scopes(fs):
