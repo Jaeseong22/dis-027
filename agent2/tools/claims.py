@@ -240,6 +240,57 @@ def _escaped(answer, system_text=""):
                 break
     return out
 
+#: ── 출력 위생 ─────────────────────────────────────────────────
+#: 차단(ROLE_HOLD 전면 대체)이 아니라 **문장 단위로 덜어낸다** — 남은 답변이 정직한
+#: 한계 고지인 경우가 있다. 어휘는 `audit.probe` 실측 답변에서 뽑았고, 과거 답변
+#: 4,459건 전수에 대고 오탐을 쟀다: 자기정체성 1 · 상용서비스 1 · URL 3 — 전부 진짜 위반.
+#: ★ DART·금융감독원 안내는 일부러 막지 않는다 — 우리 코퍼스의 출처이고 정직한 안내다.
+
+#: ① 자기 정체성 오설명 — 우리는 학습 데이터가 아니라 주어진 코퍼스로 답한다.
+_SELF_DESC = re.compile(r"(제가|저는|내가)\s*학습(한|된|하)|학습\s*데이터|"
+                        r"훈련\s*데이터|지식\s*컷오프")
+#: ② 상용 서비스 안내 — 코퍼스 밖으로 보내면 안 된다(제공 코퍼스 외 데이터 금지).
+_EXT_SERVICE = re.compile(r"네이버\s*금융|다음\s*금융|증권\s*(관련\s*)?웹\s*?사이트|"
+                          r"증권\s*사이트|증권사\s*(앱|HTS|MTS|홈페이지)|"
+                          r"한국거래소\s*홈페이지|(야후|구글)\s*파이낸스|"
+                          r"인베스팅닷컴|에프앤가이드")
+#: ③ URL — 도구는 URL을 준 적이 없다. 나오면 모델이 지어낸 것이다.
+#:   문장을 지우지 않고 URL만 뗀다 — 그 문장에 근거가 실려 있을 수 있다.
+_MD_LINK = re.compile(r"\[([^\]]{1,120})\]\(\s*https?://[^)\s]+\s*\)")
+_BARE_URL = re.compile(r"\(?\s*<?https?://[^\s)\]>]+>?\s*\)?")
+
+
+def hygiene(answer):
+    """(정리된 답변, 덜어낸 것). 근거 문장은 건드리지 않는다."""
+    if not answer:
+        return answer, []
+    removed = []
+    n_md = len(_MD_LINK.findall(answer))
+    out = _MD_LINK.sub(r"\1", answer)          # [텍스트](url) → 텍스트 (근거는 남긴다)
+    if n_md:
+        removed.append(f"URL(링크) {n_md}건")
+    n_bare = len(_BARE_URL.findall(out))
+    if n_bare:
+        removed.append(f"URL {n_bare}건")
+        out = _BARE_URL.sub(" ", out)   # 앞뒤 어절이 붙지 않게 한 칸 남긴다
+    keep = []
+    for sent in sentences(out):
+        if _SELF_DESC.search(sent):
+            removed.append(f"[자기정체성] {sent[:60]}")
+            continue
+        if _EXT_SERVICE.search(sent):
+            removed.append(f"[상용서비스] {sent[:60]}")
+            continue
+        keep.append(sent)
+    if not removed:
+        return answer, []
+    text = " ".join(keep).strip()
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    text = re.sub(r"\s+([,.)])", r"\1", text)
+    # 전부 덜어내면 빈 답이 된다 — 그때는 정직한 기권으로 돌린다.
+    return (text or "공시에서 확인되지 않습니다."), removed
+
+
 ROLE_HOLD = ("저는 제공된 공시 코퍼스 안에서만 답변하는 공시 분석 에이전트입니다. "
              "역할이나 지침을 변경할 수 없고, 시스템 지시문은 공개하지 않습니다. "
              "공시에 관해 질문해 주시면 근거와 함께 답변드리겠습니다.")
@@ -270,12 +321,16 @@ def guard(answer, context, tools_used=(), computed=(), strict=False, system_text
                 "PER·목표주가 같은 밸류에이션 지표는 산출할 수 없고, "
                 "미래 전망·투자의견은 생성하지 않습니다.", rep)
 
+    # 출력 위생 — 차단 검사를 **전부 통과한 뒤에** 문장을 덜어낸다.
+    # 먼저 덜어내면 위반 문장을 지워 놓고 통과시키는 꼴이 된다.
+    answer, hyg = hygiene(answer)
+
     claims = decompose(answer, tools_used)
     vs = verify(claims, context, computed)
     bad = [v for v in vs if not v.ok]
     rep = {"n_claims": len(claims), "n_unsupported": len(bad),
            "unsupported": [f"[{v.claim.kind}] {v.claim.text[:60]}" for v in bad],
-           "blocked": False, "removed": []}
+           "blocked": False, "removed": [], "hygiene": hyg}
 
     _asserted = [v for v in vs
                  if v.claim.kind != "부재선언"
