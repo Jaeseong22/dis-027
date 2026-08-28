@@ -1,0 +1,49 @@
+:root {
+  --accent: #ff6a00;
+  --accent-dark: #e05c00;
+  --accent-soft: #fff3e9;
+  --bg: #ffffff;
+  --panel: #f7f7f7;
+  --line: #ececec;
+  --line-strong: #dedede;
+  --text: #1b1d20;
+  --text-soft: #4b5158;
+  --muted: #85898f;
+  --danger: #c0392b;
+
+  /* Inspector — 코드/로그 표시용 */
+  --mono: ui-monospace, SFMono-Regular, Menlo, 'D2Coding', 'Noto Sans Mono CJK KR', monospace;
+  --code-bg: #fbfbfc;
+  --code-text: #384049;
+  --j-key: #a4530c;
+  --j-str: #2b6a4b;
+  --j-num: #1f5aa8;
+  --j-lit: #6c3fb0;
+
+  color-scheme: light;
+  font-family: 'Pretendard', -apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo',
+    'Segoe UI', Roboto, 'Noto Sans KR', sans-serif;
+  color: var(--text);
+  background: var(--bg);
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  -webkit-font-smoothing: antialiased;
+}
+
+#root { height: 100dvh; }
+
+button {
+  font: inherit;
+  cursor: pointer;
+}
+
+button:disabled { cursor: not-allowed; }
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
