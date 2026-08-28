@@ -1,0 +1,37 @@
+:root {
+  --navy: #0b2545;
+  --navy-soft: #13375f;
+  --accent: #1666c8;
+  --bg: #f4f6f9;
+  --surface: #ffffff;
+  --line: #dfe4ec;
+  --text: #16202f;
+  --muted: #64748b;
+  --danger: #c0392b;
+
+  color-scheme: light;
+  font-family: 'Pretendard', -apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo',
+    'Segoe UI', Roboto, 'Noto Sans KR', sans-serif;
+  color: var(--text);
+  background: var(--bg);
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  -webkit-font-smoothing: antialiased;
+}
+
+#root {
+  height: 100dvh;
+}
+
+button {
+  font: inherit;
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
