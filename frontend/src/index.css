@@ -1,12 +1,14 @@
 :root {
-  --navy: #0b2545;
-  --navy-soft: #13375f;
-  --accent: #1666c8;
-  --bg: #f4f6f9;
-  --surface: #ffffff;
-  --line: #dfe4ec;
-  --text: #16202f;
-  --muted: #64748b;
+  --accent: #ff6a00;
+  --accent-dark: #e05c00;
+  --accent-soft: #fff3e9;
+  --bg: #ffffff;
+  --panel: #f7f7f7;
+  --line: #ececec;
+  --line-strong: #dedede;
+  --text: #1b1d20;
+  --text-soft: #4b5158;
+  --muted: #85898f;
   --danger: #c0392b;
 
   color-scheme: light;
@@ -23,15 +25,16 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-#root {
-  height: 100dvh;
-}
+#root { height: 100dvh; }
 
 button {
   font: inherit;
   cursor: pointer;
 }
 
-button:disabled {
-  cursor: not-allowed;
+button:disabled { cursor: not-allowed; }
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }

@@ -8,7 +8,7 @@
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "preview": "vite preview",
-    "check": "rolldown src/Markdown.check.tsx --format esm --platform node -d node_modules/.tmp && node node_modules/.tmp/Markdown.check.js"
+    "check": "rolldown src/check.tsx --format esm --platform node -d node_modules/.tmp && node node_modules/.tmp/check.js"
   },
   "dependencies": {
     "react": "^19.2.8",
