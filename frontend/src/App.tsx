@@ -5,6 +5,7 @@ import { Markdown } from './Markdown'
 import { groupSessions, loadSessions, saveSessions } from './sessions'
 import type { Session, Turn } from './sessions'
 import { ChatIcon, MenuIcon, PlusIcon, SendIcon } from './icons'
+import { JsonPage, ResponseTabs } from './Inspector'
 import './App.css'
 
 const SUGGESTIONS = [
@@ -31,11 +32,29 @@ function useHealth(): Health {
   return health
 }
 
+/**
+ * 두 화면뿐이다 — 라우터 라이브러리를 넣을 이유가 없다.
+ * Nginx 의 SPA fallback 이 `/json` 도 index.html 로 넘겨 준다.
+ */
+function usePath(): [string, (to: string) => void] {
+  const [path, setPath] = useState(() => window.location.pathname)
+  useEffect(() => {
+    const pop = () => setPath(window.location.pathname)
+    window.addEventListener('popstate', pop)
+    return () => window.removeEventListener('popstate', pop)
+  }, [])
+  const go = (to: string) => {
+    if (to !== window.location.pathname) window.history.pushState(null, '', to)
+    setPath(to)
+  }
+  return [path, go]
+}
+
 function HealthDot({ health, label }: { health: Health; label: string }) {
   return (
-    <span className={`health ${health.state}`}>
+    <span className={`health ${health.state}`} title={label}>
       <span className="dot" aria-hidden="true" />
-      {label}
+      <span className="health-text">{label}</span>
     </span>
   )
 }
@@ -49,29 +68,24 @@ function Elapsed({ from }: { from: number }) {
   return <>{Math.floor((now - from) / 1000)}초 경과</>
 }
 
-function Accordion({ title, body }: { title: string; body: string }) {
-  if (!body) return null
-  return (
-    <details className="accordion">
-      <summary>{title}</summary>
-      <pre>{body}</pre>
-    </details>
-  )
+interface ChatProps {
+  sessions: Session[]
+  setSessions: React.Dispatch<React.SetStateAction<Session[]>>
+  health: Health
+  navOpen: boolean
+  setNavOpen: (v: boolean) => void
+  activeId: string | null
+  setActiveId: (v: string | null) => void
 }
 
-export default function App() {
-  const [sessions, setSessions] = useState<Session[]>(loadSessions)
-  const [activeId, setActiveId] = useState<string | null>(null)
+function Chat({ sessions, setSessions, health, navOpen, setNavOpen, activeId, setActiveId }: ChatProps) {
   const [input, setInput] = useState('')
-  const [navOpen, setNavOpen] = useState(false)
   const bottom = useRef<HTMLDivElement>(null)
-  const health = useHealth()
 
   const active = sessions.find((s) => s.id === activeId)
   const turns = active?.turns ?? []
   const busy = turns.some((t) => t.state === 'pending')
 
-  useEffect(() => saveSessions(sessions), [sessions])
   useEffect(() => {
     bottom.current?.scrollIntoView({ behavior: 'smooth' })
   }, [turns.length, activeId])
@@ -119,145 +133,199 @@ export default function App() {
   }
 
   return (
+    <>
+      {navOpen && <div className="scrim" onClick={() => setNavOpen(false)} />}
+
+      <nav className={`sidebar ${navOpen ? 'open' : ''}`} aria-label="채팅 기록">
+        <button className="new-chat" type="button" onClick={() => open(null)}>
+          <PlusIcon /> 새 채팅
+        </button>
+
+        <div className="history">
+          {groupSessions(sessions).map((group) => (
+            <section key={group.label}>
+              <h2>{group.label}</h2>
+              {group.sessions.map((s) => (
+                <button
+                  key={s.id}
+                  type="button"
+                  className={`history-item ${s.id === activeId ? 'active' : ''}`}
+                  onClick={() => open(s.id)}
+                  title={s.title}
+                >
+                  <ChatIcon />
+                  <span>{s.title}</span>
+                </button>
+              ))}
+            </section>
+          ))}
+        </div>
+
+        <footer className="sidebar-foot">
+          <strong>공시 Agent</strong>
+          <HealthDot
+            health={health}
+            label={health.state === 'up' ? '연결됨' : health.state === 'down' ? '연결 끊김' : '확인 중'}
+          />
+        </footer>
+      </nav>
+
+      <main className="main">
+        <div className="stream">
+          <div className="col">
+            {turns.length === 0 ? (
+              <section className="intro">
+                <h1>공시에서 필요한 정보를 찾아보세요</h1>
+                <p>국내 상장사 공시를 기반으로 답변과 근거를 제공합니다.</p>
+                <div className="suggestions">
+                  {SUGGESTIONS.map((s) => (
+                    <button key={s} type="button" className="suggestion" onClick={() => ask(s)}>
+                      {s}
+                    </button>
+                  ))}
+                </div>
+              </section>
+            ) : (
+              turns.map((turn) => (
+                <article key={turn.id} className="turn">
+                  <div className="question">
+                    <span className="avatar" aria-hidden="true">나</span>
+                    <p>{turn.question}</p>
+                  </div>
+
+                  {turn.state === 'pending' && (
+                    <div className="loading" aria-live="polite">
+                      <span className="dots" aria-hidden="true"><i /><i /><i /></span>
+                      <span>공시를 확인하고 있습니다…</span>
+                      <span className="elapsed"><Elapsed from={turn.started} /></span>
+                    </div>
+                  )}
+
+                  {turn.state === 'error' && (
+                    <div className="failed" role="alert">
+                      <p>답변을 가져오지 못했습니다. {turn.error}</p>
+                      <button type="button" onClick={() => run(active!.id, turn.id, turn.question)}>
+                        다시 시도
+                      </button>
+                    </div>
+                  )}
+
+                  {turn.state === 'done' && turn.result && (
+                    <div className="response">
+                      <div className="answer">
+                        <Markdown text={turn.result.answer} />
+                      </div>
+                      <div className="meta">답변 완료 · {((turn.ms ?? 0) / 1000).toFixed(1)}초</div>
+                      <ResponseTabs result={turn.result} />
+                    </div>
+                  )}
+                </article>
+              ))
+            )}
+            <div ref={bottom} />
+          </div>
+        </div>
+
+        <form
+          className="composer"
+          onSubmit={(e) => {
+            e.preventDefault()
+            ask(input)
+          }}
+        >
+          <div className="col field">
+            <textarea
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault()
+                  ask(input)
+                }
+              }}
+              placeholder="공시에 대해 궁금한 내용을 질문해보세요"
+              rows={1}
+              aria-label="질문 입력"
+            />
+            <button type="submit" className="send" disabled={busy || !input.trim()} aria-label="질문 보내기">
+              <SendIcon />
+            </button>
+          </div>
+          <p className="hint">
+            {busy ? '답변을 생성하는 동안에는 새 질문을 보낼 수 없습니다.' : 'Enter 전송 · Shift + Enter 줄바꿈'}
+          </p>
+        </form>
+      </main>
+    </>
+  )
+}
+
+export default function App() {
+  const [sessions, setSessions] = useState<Session[]>(loadSessions)
+  const [navOpen, setNavOpen] = useState(false)
+  // 화면을 오가도 열려 있던 대화는 유지한다 — Chat 이 언마운트돼도 남게 위로 올린다.
+  const [activeId, setActiveId] = useState<string | null>(null)
+  const [path, go] = usePath()
+  const health = useHealth()
+  const onJson = path === '/json'
+
+  useEffect(() => saveSessions(sessions), [sessions])
+
+  const nav = (to: string, label: string) => (
+    <button
+      type="button"
+      className={`view-tab ${(to === '/json') === onJson ? 'active' : ''}`}
+      onClick={() => {
+        setNavOpen(false)
+        go(to)
+      }}
+    >
+      {label}
+    </button>
+  )
+
+  return (
     <div className="shell">
       <header className="header">
-        <button className="icon-btn only-mobile" type="button" onClick={() => setNavOpen(true)} aria-label="메뉴 열기">
-          <MenuIcon />
-        </button>
+        {!onJson && (
+          <button className="icon-btn only-mobile" type="button" onClick={() => setNavOpen(true)} aria-label="메뉴 열기">
+            <MenuIcon />
+          </button>
+        )}
         <div className="brand">
           <span className="mark" aria-hidden="true" />
           <span className="brand-name">공시 Agent</span>
         </div>
+        <nav className="view-tabs" aria-label="화면 전환">
+          {nav('/', '채팅')}
+          {nav('/json', 'JSON')}
+        </nav>
         <HealthDot
           health={health}
-          label={health.state === 'up' ? `서버 정상 · ${health.agent}` : health.state === 'down' ? '서버 연결 실패' : '상태 확인 중'}
+          label={
+            health.state === 'up'
+              ? `서버 정상 · ${health.agent}`
+              : health.state === 'down'
+                ? '서버 연결 실패'
+                : '상태 확인 중'
+          }
         />
       </header>
 
       <div className="body">
-        {navOpen && <div className="scrim" onClick={() => setNavOpen(false)} />}
-
-        <nav className={`sidebar ${navOpen ? 'open' : ''}`} aria-label="채팅 기록">
-          <button className="new-chat" type="button" onClick={() => open(null)}>
-            <PlusIcon /> 새 채팅
-          </button>
-
-          <div className="history">
-            {groupSessions(sessions).map((group) => (
-              <section key={group.label}>
-                <h2>{group.label}</h2>
-                {group.sessions.map((s) => (
-                  <button
-                    key={s.id}
-                    type="button"
-                    className={`history-item ${s.id === activeId ? 'active' : ''}`}
-                    onClick={() => open(s.id)}
-                    title={s.title}
-                  >
-                    <ChatIcon />
-                    <span>{s.title}</span>
-                  </button>
-                ))}
-              </section>
-            ))}
-          </div>
-
-          <footer className="sidebar-foot">
-            <strong>공시 Agent</strong>
-            <HealthDot
-              health={health}
-              label={health.state === 'up' ? '연결됨' : health.state === 'down' ? '연결 끊김' : '확인 중'}
-            />
-          </footer>
-        </nav>
-
-        <main className="main">
-          <div className="stream">
-            <div className="col">
-              {turns.length === 0 ? (
-                <section className="intro">
-                  <h1>공시에서 필요한 정보를 찾아보세요</h1>
-                  <p>국내 상장사 공시를 기반으로 답변과 근거를 제공합니다.</p>
-                  <div className="suggestions">
-                    {SUGGESTIONS.map((s) => (
-                      <button key={s} type="button" className="suggestion" onClick={() => ask(s)}>
-                        {s}
-                      </button>
-                    ))}
-                  </div>
-                </section>
-              ) : (
-                turns.map((turn) => (
-                  <article key={turn.id} className="turn">
-                    <div className="question">
-                      <span className="avatar" aria-hidden="true">나</span>
-                      <p>{turn.question}</p>
-                    </div>
-
-                    {turn.state === 'pending' && (
-                      <div className="loading" aria-live="polite">
-                        <span className="dots" aria-hidden="true"><i /><i /><i /></span>
-                        <span>공시를 확인하고 있습니다…</span>
-                        <span className="elapsed"><Elapsed from={turn.started} /></span>
-                      </div>
-                    )}
-
-                    {turn.state === 'error' && (
-                      <div className="failed" role="alert">
-                        <p>답변을 가져오지 못했습니다. {turn.error}</p>
-                        <button type="button" onClick={() => run(active!.id, turn.id, turn.question)}>
-                          다시 시도
-                        </button>
-                      </div>
-                    )}
-
-                    {turn.state === 'done' && turn.result && (
-                      <div className="response">
-                        <div className="answer">
-                          <Markdown text={turn.result.answer} />
-                        </div>
-                        <div className="meta">답변 완료 · {((turn.ms ?? 0) / 1000).toFixed(1)}초</div>
-                        <Accordion title="근거 보기" body={turn.result.retrieved_context} />
-                        <Accordion title="추론 과정" body={turn.result.think_trace} />
-                      </div>
-                    )}
-                  </article>
-                ))
-              )}
-              <div ref={bottom} />
-            </div>
-          </div>
-
-          <form
-            className="composer"
-            onSubmit={(e) => {
-              e.preventDefault()
-              ask(input)
-            }}
-          >
-            <div className="col field">
-              <textarea
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !e.shiftKey) {
-                    e.preventDefault()
-                    ask(input)
-                  }
-                }}
-                placeholder="공시에 대해 궁금한 내용을 질문해보세요"
-                rows={1}
-                aria-label="질문 입력"
-              />
-              <button type="submit" className="send" disabled={busy || !input.trim()} aria-label="질문 보내기">
-                <SendIcon />
-              </button>
-            </div>
-            <p className="hint">
-              {busy ? '답변을 생성하는 동안에는 새 질문을 보낼 수 없습니다.' : 'Enter 전송 · Shift + Enter 줄바꿈'}
-            </p>
-          </form>
-        </main>
+        {onJson ? (
+          <JsonPage sessions={sessions} onGoChat={() => go('/')} />
+        ) : (
+          <Chat
+            sessions={sessions}
+            setSessions={setSessions}
+            health={health}
+            navOpen={navOpen}
+            setNavOpen={setNavOpen}
+            activeId={activeId}
+            setActiveId={setActiveId}
+          />
+        )}
       </div>
     </div>
   )
