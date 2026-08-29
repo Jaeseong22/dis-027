@@ -126,8 +126,13 @@ def _from_xbrl(corp_name, year, consolidated, subtype, a, month=12):
     # 분기·반기 손익은 3개월과 누적이 나란히 실린다. `values`에는 누적을 싣는다 —
     # IAS 34.20이 누적을 필수로 요구하고 3개월은 선택 표시다. 두 값 다 `spans`로 낸다.
     # 1분기는 3개월 ≡ 누적이라 되물을 것이 없어 `spans`를 만들지 않는다.
-    flow = None if subtype == "annual" else xbrl.CUMULATIVE
-    other = xbrl.THREE_MONTH if (flow and month != 3) else None
+    # ★★ `values`에는 **해당 분기(3개월)**를 싣는다. 누적을 기본으로 하면 반기·3분기에서
+    #   값 1,013개가 바뀌는데(전수 A/B) 그게 옳다는 근거가 없다 — 정답셋 196문항에
+    #   2·3분기/반기 질의가 0건이다. 종전 라벨 파서도 3개월을 냈고 한국어 "3분기 실적"도
+    #   보통 해당 분기를 뜻한다. IAS 34.20은 둘 다 요구해 편을 안 들어 준다.
+    #   → 근거 없는 기본값 변경을 하지 않는다. 누적은 `spans`로 함께 나간다.
+    flow = None if subtype == "annual" else xbrl.THREE_MONTH
+    other = xbrl.CUMULATIVE if (flow and month != 3) else None
 
     values, krw, labels, series, status, codes, units = {}, {}, {}, {}, {}, {}, {}
     spans = {}
@@ -156,7 +161,7 @@ def _from_xbrl(corp_name, year, consolidated, subtype, a, month=12):
         if other and cid not in xbrl._INSTANT:
             g = xbrl.pick(fs, cid, scope, year, other)
             if g is not None and g.value != f.value:
-                spans[cid] = {xbrl.THREE_MONTH: g.value, xbrl.CUMULATIVE: f.value}
+                spans[cid] = {xbrl.THREE_MONTH: f.value, xbrl.CUMULATIVE: g.value}
         a.accept(f.value, "Exact_Match", f"{cid} ← {f.code} [{scope}] {f.label[:20]}",
                  f"XBRL {f.decimals or 'INF'}")
 
@@ -199,7 +204,39 @@ def _abs_costs(r):
     return r
 
 
-def extract(corp, year=None, month=12, consolidated=True):
+def _fill_gaps(res, corp, year, month, consolidated):
+    """XBRL 이 못 잡은 개념을 **라벨 파서로 메운다**. 덮어쓰지 않고 빈 자리만 채운다.
+
+    `_from_xbrl`이 성공하면 그 결과를 통째로 쓴다. 그런데 XBRL 코드가 없거나 그 회사
+    문서에 그 코드가 안 붙은 개념은 값이 통째로 사라진다 — 라벨 파서는 잡던 것이다.
+    전수 A/B: 분기 경로를 열자 사라진 값 94건 → 이 함수로 **0건**.
+
+    ★ 분기·반기에만 건다. 분기는 이 변경 **전에도 라벨 파서를 돌렸으므로** 새 비용이
+      없다. 연간에 걸면 가장 흔한 경로(608회 중 487회)에 395ms/사가 붙는데 되살리는
+      것은 30건뿐이고 그 구멍은 이 변경 이전부터 있던 것이다.
+    ★ 덮어쓰지 않는다 — XBRL 이 준 값은 연결/별도와 스케일이 컨텍스트로 확정된다.
+    """
+    lab = extract(corp, year=year, month=month, consolidated=consolidated, _use_xbrl=False)
+    lv = lab.get("values") or {}
+    if not lv:
+        return res
+    filled = []
+    for cid, v in lv.items():
+        if cid in res.get("values", {}):
+            continue
+        res["values"][cid] = v
+        u = (lab.get("units") or {}).get(cid)
+        if u is not None:
+            res.setdefault("units", {})[cid] = u
+            res.setdefault("krw", {})[cid] = v * ((getattr(u, "scale", None) or 1))
+        res.get("status", {}).pop(cid, None)
+        filled.append(cid)
+    if filled:
+        res["gap_filled"] = tuple(filled)
+    return res
+
+
+def extract(corp, year=None, month=12, consolidated=True, _use_xbrl=True):
     """기업·기간 → 개념 값 + 상태 + 감사 로그."""
     a = Audit("finance.extract", f"{corp} {year or '최신'}")
     c = store.resolve_corp(corp)
@@ -224,10 +261,10 @@ def extract(corp, year=None, month=12, consolidated=True):
                 "profile": None, "audit": a}
 
     # ⓪ XBRL 태그 우선. 없거나 부족하면 아래 라벨 파서로 폴백한다(교체가 아니라 상위 경로).
-    xb = _from_xbrl(c["corp_name"], year, consolidated, subtype, a, month)
+    xb = _from_xbrl(c["corp_name"], year, consolidated, subtype, a, month) if _use_xbrl else None
     if xb is not None:
         doc_row = sorted(docs, key=lambda r: r["rcept_dt"])[-1]
-        return _abs_costs({"corp": c["corp_name"], "year": year, "month": month,
+        out = _abs_costs({"corp": c["corp_name"], "year": year, "month": month,
                 "consolidated": consolidated, "scope": xb["scope"], "via": "xbrl",
                 "period": doc_row["report_nm"], "doc_id": doc_row["doc_id"],
                 "rcept_dt": doc_row["rcept_dt"],
@@ -239,6 +276,11 @@ def extract(corp, year=None, month=12, consolidated=True):
                 "codes": xb["codes"], "series": xb["series"], "status": xb["status"],
                 "identity_error": xb["identity_error"],
                 "profile": K.observed_profile(set(xb["values"])), "audit": a})
+        # 분기·반기는 XBRL 이 못 잡은 개념을 라벨 파서로 메운다(위 `_fill_gaps` 주석).
+        if subtype != "annual":
+            out = _fill_gaps(out, c["corp_name"], year, month, consolidated)
+            out["profile"] = K.observed_profile(set(out["values"]))
+        return out
 
     # ① 버전 전체를 본다 — 정정본이 문서 일부만 다시 내는 경우가 있다
     cands = []

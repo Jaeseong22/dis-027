@@ -665,6 +665,12 @@ def run(question, llm=None, budget=None, question_id="", audit=None,
         stop = "ungrounded"
 
     # 근거 공시 표시. 모델이 옮겨 적지 않으면 관측의 `출처`를 그대로 붙인다.
+    # 분기·반기 기간 기준(3개월/누적)을 답변이 안 밝혔으면 코드가 밝히고 되묻는다.
+    if not rep.get("blocked"):
+        answer, _basis = _span_basis_note(answer, ctx)
+        if _basis:
+            trace.append(f"기간기준: 답변이 기준을 안 밝혀 코드가 붙였다 — {_basis}")
+
     answer, _n_cite = _cite_fallback(answer, evidence, blocked=bool(rep.get("blocked")))
     if _n_cite:
         trace.append(f"근거표시: 답변에 근거가 없어 관측의 출처 {_n_cite}건을 덧붙였다")
@@ -672,6 +678,32 @@ def run(question, llm=None, budget=None, question_id="", audit=None,
     trace.append(f"정지[{stop}] {STOP.get(stop, ('미상', '미상'))[0]} · {budget.report(step, llm)}")
     return _result(question, question_id, answer, evidence, trace, stop,
                    step, budget, llm, audit)
+
+
+#: 분기·반기는 손익이 3개월과 누적 두 벌로 실린다. `get_financials`가 둘 다 주고
+#: `기간구분_note`가 "어느 기준인지 밝히고 확인 질문을 덧붙이라"고 지시하는데 안 지켜진다.
+#: 실측(배포 서버 종단 확인): "3분기 당기순이익 734,723,721,225원입니다 … ※ 연결 기준"
+#: — 3개월인지 누적인지 한 마디도 없었다. `_cite_fallback`과 같은 병이라 코드가 붙인다.
+#: ★ 추측하지 않는다 — 답변의 수치가 관측의 어느 쪽 값과 **글자 그대로 일치**할 때만 붙인다.
+_SPAN_PAIR = _re.compile(
+    r'"(해당 분기\(3개월[^"]*)"\s*:\s*"([^"]+)"\s*,\s*"(누적\([^"]*\))"\s*:\s*"([^"]+)"')
+_SAID_BASIS = _re.compile(r"3개월|누적|해당\s*분기")
+
+
+def _span_basis_note(answer, ctx):
+    """(답변, 붙인 기준 라벨). 못 가르면 원 답변 그대로 돌려준다."""
+    if not answer or _SAID_BASIS.search(answer):
+        return answer, None
+    pairs = _SPAN_PAIR.findall(ctx or "")
+    if not pairs:
+        return answer, None
+    for q_lab, q_val, a_lab, a_val in pairs:
+        for lab, val, other in ((q_lab, q_val, a_lab), (a_lab, a_val, q_lab)):
+            num = _re.sub(r"[^\d,]", "", val).strip(",")
+            if len(num) >= 3 and num in answer:
+                return (f"{answer}\n\n※ 위 수치는 **{lab}** 기준입니다. "
+                        f"{other} 기준이 필요하시면 말씀해 주십시오."), lab
+    return answer, None
 
 
 #: 답변에 이미 근거 공시가 표시됐는지 — 접수번호 14자리로 본다.
@@ -720,7 +752,7 @@ def _cite_fallback(answer, evidence, blocked=False):
 _TRACE_SECTIONS = (
     ("질의 해석", ("질의:", "요건:")),
     ("근거 수집", ("스텝 ", "마무리", "LLM 오류", "도구오류", "완료게이트")),
-    ("검증",      ("근거가드", "근거표시", "요건 보완")),
+    ("검증",      ("근거가드", "근거표시", "기간기준", "요건 보완")),
     ("종료",      ("정지[",)),
 )
 

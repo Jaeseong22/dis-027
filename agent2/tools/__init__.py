@@ -569,7 +569,7 @@ def get_financials(corp: str, year: int = None, month: int = 12,
         spans = {k: {f"해당 분기(3개월 · {_q[0]})": _money_str(v.get("3개월"), cunits.get(k)),
                      f"누적({_q[1]})": _money_str(v.get("누적"), cunits.get(k))}
                  for k, v in r["spans"].items()}
-        span_note = (f"※ 위 values 는 **누적({_q[1]})** 기준입니다. 이 보고서는 손익·"
+        span_note = (f"※ 위 values 는 **해당 분기(3개월 · {_q[0]})** 기준입니다. 이 보고서는 손익·"
                      f"현금흐름을 **해당 분기(3개월 · {_q[0]})**와 **누적** 두 가지로 "
                      "싣고, 위 `기간구분`에 둘 다 담았습니다. **답변에 어느 기준인지 "
                      "반드시 밝히고**, 끝에 '해당 분기(3개월) 기준과 누적 기준 중 어느 "

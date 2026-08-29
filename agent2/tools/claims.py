@@ -260,6 +260,41 @@ _MD_LINK = re.compile(r"\[([^\]]{1,120})\]\(\s*https?://[^)\s]+\s*\)")
 _BARE_URL = re.compile(r"\(?\s*<?https?://[^\s)\]>]+>?\s*\)?")
 
 
+#: ④ 지어낸 `section:` — 도구가 준 적 없는 섹션명을 답변이 적는다.
+#:   실측(배포 서버 종단 확인): `get_financials` 는 `section` 을 주지 않는데 답변이
+#:   `(근거: 분기보고서 (2025.09), section: net income)` 이라고 적었다(평가지표 4 환각).
+#:   ★ 판정은 **관측의 `section` 필드 값인가**로 본다. 전 회차 실측(답변 4,459건 ·
+#:     section 값 33종 115회) 대부분이 섹션이 아니라 도구 반환 키·계정 라벨이다 —
+#:     `계수` 27회 · `재고자산` 17회 · `revenue` 2회 · `없음` 4회. 이 말들은 관측
+#:     본문에는 있으므로 "관측 어딘가에 있나"로 보면 안 걸린다.
+_ANS_SECTION = re.compile(r"\s*[,·]?\s*(?:section|섹션)\s*[:：]\s*([^),\n]{1,80})")
+#: 관측에서 **section 필드의 값**만 꺼낸다.
+_OBS_SECTION = re.compile(r"""['"]?(?:section|섹션)['"]?\s*[:：]\s*['"]?([^'"\n,}]{2,200})""")
+
+
+def drop_fake_section(answer, context):
+    """관측의 `section` 값이 아닌 `section: X` 구절을 뗀다. (정리된 답변, 뗀 것)."""
+    if not answer or not _ANS_SECTION.search(answer):
+        return answer, []
+    real = [re.sub(r"\s+", " ", v).strip() for v in _OBS_SECTION.findall(context or "")]
+    dropped = []
+
+    def sub(m):
+        sec = re.sub(r"\s+", " ", m.group(1)).strip().rstrip(".)").strip("'\"")
+        # 도구가 준 섹션이면 그대로 둔다. 모델이 앞뒤를 자를 수 있어 포함 관계로 본다.
+        if sec and any(sec in v or v in sec for v in real):
+            return m.group(0)
+        dropped.append(sec)
+        return ""
+
+    out = _ANS_SECTION.sub(sub, answer)
+    if not dropped:
+        return answer, []
+    out = re.sub(r"\(\s*근거\s*[:：]\s*\)", "", out)      # 빈 근거 괄호가 남으면 지운다
+    out = re.sub(r"[ \t]{2,}", " ", out).strip()
+    return (out or answer), dropped
+
+
 def hygiene(answer):
     """(정리된 답변, 덜어낸 것). 근거 문장은 건드리지 않는다."""
     if not answer:
@@ -324,6 +359,9 @@ def guard(answer, context, tools_used=(), computed=(), strict=False, system_text
     # 출력 위생 — 차단 검사를 **전부 통과한 뒤에** 문장을 덜어낸다.
     # 먼저 덜어내면 위반 문장을 지워 놓고 통과시키는 꼴이 된다.
     answer, hyg = hygiene(answer)
+    answer, fake_sec = drop_fake_section(answer, context)
+    if fake_sec:
+        hyg.append(f"[지어낸 섹션] {' · '.join(fake_sec)}")
 
     claims = decompose(answer, tools_used)
     vs = verify(claims, context, computed)

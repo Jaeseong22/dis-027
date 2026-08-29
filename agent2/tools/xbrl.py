@@ -56,7 +56,11 @@ CONCEPTS = {
     # **IAS 1.54(m)** 재무상태표 최소 표시 항목의 금융부채.
     "short_term_borrowings": [
         "ifrs-full_ShorttermBorrowings",
-        "ifrs-full_CurrentLoansReceivedAndCurrentPortionOfNoncurrentLoansReceived"],
+        "ifrs-full_CurrentLoansReceivedAndCurrentPortionOfNoncurrentLoansReceived",
+        # 위 둘이 없는 회사가 있다(현대제철·크래프톤·HD현대중공업 등).
+        # 라벨 게이트(`_LABEL_MUST` `^단기차입금`)가 유동성장기차입금을 막아 안전하다.
+        # 전수 A/B: 새로 4건 · 사라짐 0 · 바뀜 0.
+        "ifrs-full_OtherCurrentBorrowingsAndCurrentPortionOfOtherNoncurrentBorrowings"],
 
     # 손익계산서 (기간, kind="d")
     "revenue":           ["ifrs-full_Revenue"],
@@ -70,11 +74,20 @@ CONCEPTS = {
     "pretax_income":     ["ifrs-full_ProfitLossBeforeTax"],
     "net_income":        ["ifrs-full_ProfitLoss"],
     "net_income_owners": ["ifrs-full_ProfitLossAttributableToOwnersOfParent"],
+    # ★ `oci`·`total_ci` 에 코드가 없어 XBRL 경로가 이기면 값이 사라졌다.
+    #   연간에서도 68/70사가 이 구멍에 걸려 있었다(oci 2사 · total_ci 1사만 나왔다).
+    #   전 코퍼스 실측: `기타포괄손익` 1,316건 · `총포괄손익` 1,310 + `총포괄이익` 334.
+    "oci":               ["ifrs-full_OtherComprehensiveIncome"],
+    "total_ci":          ["ifrs-full_ComprehensiveIncome"],
     "eps_basic":         ["ifrs-full_BasicEarningsLossPerShare"],
     "eps_diluted":       ["ifrs-full_DilutedEarningsLossPerShare"],
     "tax_expense":       ["ifrs-full_IncomeTaxExpenseContinuingOperations"],
     "equity_method_income": [
         "ifrs-full_ShareOfProfitLossOfAssociatesAndJointVenturesAccountedForUsingEquityMethod"],
+    # ★ `…OfAssociatesAccountedForUsingEquityMethod`(관계기업 전용)을 더하면 값 11건이
+    #   새로 생기지만 **효성중공업 2건이 뒤집힌다**. 두 코드가 같은 금액을 다른 부호로
+    #   담는다 — 본표 `지분법손실 2,148,885,480`(양수 표기) ↔ 주석 `-2,149백만원`.
+    #   부호 규약을 확정하기 전에는 더하지 않는다.
 
     "net_interest_income": ["ifrs-full_InterestRevenueExpense"],
     "net_fee_income":      ["ifrs-full_FeeAndCommissionIncomeExpense"],
