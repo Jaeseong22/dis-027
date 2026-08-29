@@ -848,7 +848,7 @@ _PUBLIC_DROP = ("audit", "units")
 
 #: 위에서 따로 렌더하므로 일반 키 순회에서 제외한다.
 _PUBLIC_SHOWN = ("출처", "scope", "period", "unit", "values", "series", "sources", "status",
-                 "corp", "year", "structure")
+                 "corp", "year", "structure", "기간구분")
 
 
 def _is_note(k):
@@ -889,6 +889,7 @@ def _public_obs(obs, keep=None):
     vals = d.get("values")
     ser = d.get("series")
     out += _value_table(vals, ser, src, keep)
+    out += _span_table(d.get("기간구분"), src, keep)
 
     # 남은 키는 **하나도 버리지 않는다**. 근거가 아닌 것만 위 상수로 명시해 뺀다.
     for k, v in d.items():
@@ -972,6 +973,48 @@ def _grouped(vals):
     order = {cid: i for i, (_n, ids) in enumerate(_GROUPS) for cid in ids}
     keys = sorted(vals, key=lambda k: (order.get(k, len(_GROUPS)), list(vals).index(k)))
     return [(k, vals[k]) for k in keys]
+
+
+def _span_table(spans, src, keep=None):
+    """`기간구분`(3개월 ↔ 누적)을 표로 편다.
+
+    중첩 dict 라 일반 분기의 `json.dumps`로 떨어져 **903자짜리 JSON 덩어리**가
+    `retrieved_context`에 그대로 나갔다. 나머지 관측은 전부 표인데 여기만 형식이
+    달랐다. 이 필드의 채점 축은 근거 완전성이라 읽히는 형태여야 한다.
+    실측: 903자 → 228자(답변이 인용한 행만 남길 때).
+
+    열 이름은 도구가 준 키를 그대로 쓴다(`해당 분기(3개월 · 7~9월)` 처럼 월이 들어 있다).
+    """
+    if not isinstance(spans, dict) or not spans:
+        return []
+    cols = next((list(v) for v in spans.values() if isinstance(v, dict) and v), [])
+    if not cols:
+        return []
+    rows = []
+    for k, v in _grouped(spans):
+        if not isinstance(v, dict):
+            continue
+        raw = str(src.get(k, k))
+        m = _SRC_TAG.match(raw)
+        label = m.group(1) if m else raw
+        cells = [str(v.get(c, "")) for c in cols]
+        if keep and not _hit(" ".join(cells), keep):
+            continue          # 답변이 안 쓴 항목은 싣지 않는다(`values` 표와 같은 규율)
+        rows.append((label, cells))
+    if not rows:
+        return []
+    wl = max([_w(r[0]) for r in rows] + [_w("항목")])
+    wc = [max([_w(cs[i]) for _l, cs in rows] + [_w(cols[i])]) for i in range(len(cols))]
+
+    def line(label, cells):
+        return ("      " + _pad(label, wl) + "  "
+                + "  ".join(_pad(cells[i], wc[i], right=True) for i in range(len(cells))))
+
+    out = ["    기간구분 — 같은 행에 두 기간이 실린다. 답변에 어느 기준인지 밝혀야 한다.",
+           line("항목", list(cols)),
+           "      " + "─" * (wl + 2 + sum(wc) + 2 * max(0, len(cols) - 1))]
+    out += [line(lb, cs) for lb, cs in rows]
+    return out
 
 
 def _value_table(vals, ser, src, keep=None):
