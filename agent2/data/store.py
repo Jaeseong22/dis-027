@@ -169,14 +169,34 @@ def _corp_index():
     return idx
 
 
+#: 접두 해소의 최소 길이. 1자로는 무엇이든 걸린다.
+_PREFIX_MIN = 2
+
+
+def _prefix_corp(k):
+    """접두가 **정확히 한 회사**에만 걸릴 때만 해소한다. 둘 이상이면 None.
+
+    모델이 회사명을 줄여 부른다 — `하나금융`·`우리금융`으로 부르면 코퍼스명
+    `하나금융지주`·`우리금융지주`에 닿지 못한다. 모호하면 회사를 고르는 것이
+    지어내는 것이므로 해소하지 않는다(전수 70사: 법인 접미를 뗀 형태 10개 중 9개가
+    유일하고, `삼성`·`현대`·`LG`처럼 여러 개가 걸리는 접두는 되묻기 게이트가 받는다).
+    """
+    if len(k) < _PREFIX_MIN:
+        return None
+    hit = [c for c in universe() if _norm(c["corp_name"]).startswith(k)]
+    return hit[0] if len(hit) == 1 else None
+
+
 def resolve_corp(q):
     """기업 해소. 못 찾으면 None(억지로 채우지 않는다).
 
     질의 쪽에서도 법인 상용구를 뗀다 — `(주)이마트`·`주식회사 카카오`로 물어도 걸린다.
+    정확 일치가 없으면 **유일한 접두**까지만 인정한다(`_prefix_corp`).
     """
     idx = _corp_index()
     k = _norm(q)
-    return idx.get(k) or idx.get(_strip_kr_form(k))
+    return (idx.get(k) or idx.get(_strip_kr_form(k))
+            or _prefix_corp(k) or _prefix_corp(_strip_kr_form(k)))
 
 
 def docs(corp=None, doc_group=None, doc_subtype=None, base_year=None,
