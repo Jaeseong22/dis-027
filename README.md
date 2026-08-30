@@ -40,6 +40,9 @@ curl -G "http://101.79.19.164/answer" \
 - 헬스체크는 `GET /health` — `HEAD`는 501을 낸다
 - 서버: 네이버클라우드 `c2-g3a`(2 vCPU / 4 GB / 20 GB) · Ubuntu 24.04 ·
   systemd 서비스 `gongsi` · 코퍼스는 `/data/corpus`
+- 80번은 **nginx**가 잡는다. 정적 프론트(`frontend/dist`)를 서빙하고
+  `/answer`·`/health` 만 백엔드(`127.0.0.1:8001`)로 넘긴다.
+  평가 경로는 `http://101.79.19.164/answer` 그대로다
 
 ### 배포 구성 (재현용)
 
@@ -58,7 +61,7 @@ Environment=CORPUS_DIR=/data/corpus
 Environment=MALLOC_ARENA_MAX=2
 
 ExecStartPre=/bin/sh -c 'test -s /opt/gongsi/agent2/.cache/filings/records.jsonl || /opt/gongsi/venv/bin/python -m agent2.data.filings'
-ExecStart=/opt/gongsi/venv/bin/python -m agent2.server 80
+ExecStart=/opt/gongsi/venv/bin/python -m agent2.server 8001
 
 Restart=always
 RestartSec=10
@@ -77,6 +80,39 @@ WantedBy=multi-user.target
 | `ExecStartPre` | 정형공시 배치 | 캐시가 비었을 때만 돈다. 정본표 예열은 `server.serve()`가 포트를 열기 **전에** 한다 |
 | `TimeoutStartSec=1800` | 30분 | 콜드 예열이 기동 안에 들어가므로 기본 90초로는 모자란다 |
 | `Restart=always` | — | 장애 시 자동 복구 |
+
+80번은 nginx 가 잡는다. `/etc/nginx/sites-enabled/default`:
+
+```nginx
+server {
+    listen 80;
+    server_name _;
+    root /opt/gongsi/frontend/dist;
+    index index.html;
+
+    location / { try_files $uri $uri/ /index.html; }          # 정적 프론트
+
+    location /answer {                                        # 평가 경로
+        proxy_pass http://127.0.0.1:8001;
+        proxy_http_version 1.1;
+        proxy_connect_timeout 10s;
+        proxy_send_timeout    300s;
+        proxy_read_timeout    300s;
+        send_timeout          300s;
+    }
+
+    location /health {
+        proxy_pass http://127.0.0.1:8001;
+        proxy_http_version 1.1;
+        proxy_connect_timeout 10s;
+        proxy_send_timeout    300s;
+        proxy_read_timeout    300s;
+    }
+}
+```
+
+★★ **타임아웃 300초는 필수다.** nginx 기본값은 60초인데 응답이 최대 110초까지 간다
+(다중 비교 질의 실측 40.7초). 60초로 두면 긴 질의가 `504`로 잘린다.
 
 `EnvironmentFile`은 쓰지 않는다. LLM 자격증명과 프로필은 `/opt/gongsi/agent2/.env`를
 `agent2/config.py:load_env()`가 읽는다. **이 파일은 저장소에 없다**(비밀키).
