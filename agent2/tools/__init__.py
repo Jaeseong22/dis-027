@@ -1785,11 +1785,52 @@ def calculate(op: "add|subtract|multiply|divide|sum_|growth|ratio|margin|cagr|sc
     """
     if op not in _compute.ops():
         return {"op": op, "result": None, "error": f"미등록 연산자. 사용 가능: {_compute.ops()}"}
+    nums, bad = _calc_nums(values)
+    if bad:
+        return {"op": op, "values": values, "result": None,
+                "error": f"수치로 읽을 수 없는 값: {bad}. 관측에 있는 숫자를 그대로 주십시오"}
     try:
-        result = _compute.run("sum_", values) if op == "sum_" else _compute.run(op, *values)
+        result = _compute.run("sum_", nums) if op == "sum_" else _compute.run(op, *nums)
     except TypeError as e:
         return {"op": op, "values": values, "result": None, "error": str(e)}
     return {"op": op, "values": values, "result": result}
+
+
+#: 계산 인자에서 떼어낼 표기. 모델은 관측의 **서식값을 그대로** 복사해 넘긴다 —
+#: `9,423,400` · `0.99%` · `(115)` · `333,605,938 백만원`.
+_CALC_STRIP = _re.compile(r"(?:백만원|십억원|억원|천원|조원|원|명|주|개사|개|배|%|,|\s)+")
+
+
+def _calc_num(x):
+    """계산 인자 1개 → 수치. 못 읽으면 None.
+
+    문자열을 그대로 연산에 넘겨 `str - str`로 죽고 있었다 — 과거 호출을 전수로
+    재실행하니 문자열 인자의 96%가 실패했고, 그때마다 모델이 직접 산술해 틀렸다.
+    못 읽으면 0으로 대체하지 않고 호출을 실패시킨다(`compute`의 정직한 실패 규율).
+    """
+    if isinstance(x, bool):
+        return None
+    if isinstance(x, (int, float)):
+        return float(x)
+    if not isinstance(x, str):
+        return None
+    t = x.strip()
+    neg = (t.startswith("(") and t.endswith(")")) or t[:1] in ("-", "\u2212", "\u25b3", "\u25bc")
+    t = _CALC_STRIP.sub("", t.strip("()")).lstrip("-\u2212\u25b3\u25bc")
+    if not t or not _re.fullmatch(r"\d+(?:\.\d+)?", t):
+        return None
+    v = float(t)
+    return -v if neg else v
+
+
+def _calc_nums(values):
+    """(수치 목록, 못 읽은 원본 목록)."""
+    vals = values if isinstance(values, (list, tuple)) else [values]
+    out, bad = [], []
+    for x in vals:
+        n = _calc_num(x)
+        (bad if n is None and x is not None else out).append(x if n is None else n)
+    return out, bad
 
 
 @tool("1-6", "2-1", "2-8")
