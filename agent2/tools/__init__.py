@@ -2,6 +2,7 @@
 import json as _json
 import os as _os
 import re as _re
+from functools import lru_cache as _lru_cache
 
 from agent2 import config as _config
 
@@ -46,26 +47,38 @@ def resolve_company(name: str) -> dict:
     return _facts.company(name)
 
 
+#: `sector_ranking`(시가총액만)을 `rank_by_metric`(80종)으로 **대체**한 것이다.
+#: 추가가 아니라 대체인 이유 — `registry.MAX_TOOLS = 12`이고 그 근거가 BFCL 실측
+#: (4개→51개에서 43%→2%)이다. 대체가 안전한 근거는 과거 회차 전수다: 도구 호출 5,715회에서
+#: `sector_ranking` 0회. `rank_by_metric(metric="시가총액")`이 종전 동작의 상위집합이다.
+#: 값은 질의 시점에 계산하지 않고 `data/rankings.py`의 예열 배치를 읽는다.
 @tool("1-5", "1-6")
-
-
-def sector_ranking(sector: str = None,
+def rank_by_metric(metric: str = "시가총액", top: int = 10, ascending: bool = False,
+                   sector: str = None,
                    industry: "IT|건강관리|경기관련소비재|금융|산업재|소재|"
                              "커뮤니케이션서비스|필수소비재" = None,
-                   top: int = 10) -> list:
-    """섹터·업종 안에서 시가총액 순위를 매긴다. 섹터를 안 주면 70개사 전체를 매긴다.
+                   year: int = None) -> dict:
+    """70개사를 한 지표로 줄 세운다. 회사를 지정하지 않은 순위·비교 질의에 쓴다.
 
-    시가총액은 주최가 준 universe.csv(2026-07-24 조회) 값이다.
+    지침: 매출액·영업이익·당기순이익·자산총계·직원수·시가총액·부채비율·영업이익률 등
+    45종을 지원합니다. 값이 없는 회사는 순위에서 빼고 `제외`에 이름과 이유를 적어 줍니다 —
+    그 목록을 답변에 함께 밝히십시오. 부채비율처럼 낮을수록 좋은 지표는 ascending=true로
+    부르십시오.
 
     인자:
-        sector: 섹터명 일부. 예 "반도체" "금융"
-        industry: 업종 대분류 8종 중 하나
-        top: 상위 몇 개까지
+        metric: 지표명. 한글·영문 모두 받는다. 예 "매출액" "영업이익" "직원수" "부채비율"
+        top: 상위 몇 개까지 (0이면 전부)
+        ascending: 오름차순(작은 값이 1위). 부채비율 등에 쓴다
+        sector: 섹터명 일부로 좁힌다. 예 "반도체" "금융"
+        industry: 업종 대분류 8종 중 하나로 좁힌다
+        year: 사업연도. 기본은 배치가 있는 최신 연도
 
     반환:
-        [{rank, corp_name, sector, market_cap_eok}] 시가총액 내림차순
+        {지표, 기준, 정렬, 포함, 제외{n, 기업, 사유}, 주의,
+         순위[{rank, corp_name, 값, 원단위_환산, 원문라벨, 출처}]}
     """
-    return _facts.sector_ranking(sector=sector, industry=industry, top=top)
+    return _rank(metric=metric, top=top, ascending=ascending, sector=sector,
+                 industry=industry, year=year)
 
 
 @tool("2-1", "2-8")
@@ -309,14 +322,188 @@ def _kor_amount(n):
     return ("-" if neg else "") + (" ".join(out) or "0") + "원"
 
 
+#: 비율 행 라벨. `율` 한 글자는 넣지 않는다 — `환율차이`·`환율변동`(실제 금액)이 걸린다.
+_RATIO_ROW = _re.compile(r"비율|률")
+
+
+#: ── 순위(`rank_by_metric`) 구현 ────────────────────────────────
+#:
+#: 지표 별칭은 지어내지 않는다 — `concepts.ALL`의 한글 라벨을 그대로 쓰고, 거기에 없는
+#: 키(현금흐름·자본금 등)만 `get_financials`가 이미 쓰는 이름으로 붙인다.
+_RANK_ALIAS_EXTRA = {
+    "cf_operating": ("영업활동현금흐름", "영업현금흐름", "영업활동 현금흐름"),
+    "cf_investing": ("투자활동현금흐름", "투자활동 현금흐름"),
+    "cf_financing": ("재무활동현금흐름", "재무활동 현금흐름"),
+    "issued_capital": ("자본금",),
+    "net_income_owners": ("지배주주순이익", "지배기업소유주지분순이익"),
+    "equity_begin": ("기초자본",),
+    "employees": ("직원수", "직원 수", "임직원수", "종업원수", "직원"),
+    "market_cap": ("시가총액", "시총"),
+}
+
+
+@_lru_cache(maxsize=1)
+def _rank_alias():
+    """한글·영문 지표명 → 배치의 지표 키."""
+    out = {}
+    for c in _K.ALL:
+        out[c.id] = c.id
+        for lab in c.labels:
+            out[_norm_key(lab)] = c.id
+    for key, names in _RANK_ALIAS_EXTRA.items():
+        out[key] = key
+        for nm in names:
+            out[_norm_key(nm)] = key
+    return out
+
+
+def _norm_key(s):
+    return _re.sub(r"\s", "", str(s or "")).lower()
+
+
+def _rank_metric_key(metric, sample):
+    """지표명을 배치 키로. 비율은 배치가 한글 키를 그대로 쓴다."""
+    k = _norm_key(metric)
+    if metric in sample:                       # `부채비율`처럼 배치 키와 같은 경우
+        return metric
+    for key in sample:                         # 공백만 다른 경우
+        if _norm_key(key) == k:
+            return key
+    alias = _rank_alias().get(k) or _rank_alias().get(metric)
+    if alias in sample:
+        return alias
+    # `매출증가율` 꼴 — 접미사 사전은 `_growth_base`가 소유한다(사전은 한 곳이다).
+    base = _growth_base(metric)
+    if base and f"{base}_growth" in sample:
+        return f"{base}_growth"
+    return None
+
+
+def _rank(metric, top=10, ascending=False, sector=None, industry=None, year=None):
+    """70개사 한 지표 순위. **배치를 읽는다** — 질의 시점에 70사를 훑지 않는다."""
+    from agent2.data import rankings as _rankings
+
+    yrs = _rankings.years()
+    yr = year or (max(yrs) if yrs else 2025)
+    data = _rankings.load(yr)
+    built_now = ""
+    if data is None:
+        # 예열이 안 된 환경. 한 번 만들고 쓴다(15초) — 그 사실을 답변에 밝히게 적어 준다.
+        _rankings.build(yr, verbose=False)
+        data = _rankings.load(yr)
+        built_now = "※ 순위 배치가 없어 이번 호출에서 생성했습니다(다음부터는 즉시 응답합니다). "
+    if data is None:
+        return {"status": "순위 배치를 만들지 못했습니다", "지표": metric}
+
+    rows = data["rows"]
+    sample = {k for v in rows.values() for k in v["지표"]}
+    key = _rank_metric_key(metric, sample)
+    if key is None:
+        # 막다른 길에는 대체 지시를 함께 준다. 지원 지표를 길게 나열하면 그 자체가
+        # "이 중 아무거나 고르라"는 신호가 되어 모델이 **다른 지표로 갈아탄다**
+        # (실측: `NPL비율` 미지원 → `부채비율`을 불러 질문과 다른 값을 답했다).
+        return {"status": "이 지표는 순위 도구가 다루지 않습니다",
+                "지표": metric,
+                "note": f"'{metric}'는 이 도구가 줄 세울 수 있는 값이 아닙니다. "
+                        f"**다른 지표로 바꿔 부르지 마십시오** — 질문이 물은 것과 다른 값을 "
+                        f"답하게 됩니다. 이런 지표는 회사별 표에 있으니 `find_tables`나 "
+                        f"`find_sections`로 각 회사의 해당 표를 찾아 값을 비교하십시오.",
+                "이 도구가 다루는 것": "재무제표 표준 항목과 그 비율 — 매출액·영업이익·"
+                                  "당기순이익·자산총계·시가총액·직원수·부채비율·"
+                                  "영업이익률·매출증가율 등"}
+
+    # 대상 좁히기 — 섹터·업종은 universe 값 그대로다(부분일치).
+    pool = {}
+    for corp, v in rows.items():
+        if sector and _norm_key(sector) not in _norm_key(v.get("섹터")):
+            continue
+        if industry and _norm_key(industry) != _norm_key(v.get("업종")):
+            continue
+        pool[corp] = v
+
+    have, miss = [], []
+    for corp, v in pool.items():
+        m = v["지표"].get(key)
+        if m is None:
+            miss.append((corp, v.get("구조") or ""))
+            continue
+        have.append((corp, v, m))
+    have.sort(key=lambda x: (x[2].get("원") if "원" in x[2] else x[2].get("값")),
+              reverse=not ascending)
+
+    out = []
+    for i, (corp, v, m) in enumerate(have if not top else have[:max(top, 0)], 1):
+        row = {"rank": i, "corp_name": corp, "값": m["표기"], "섹터": v.get("섹터", "")}
+        if "원" in m:
+            row["원단위_환산"] = _kor_amount(m["원"])
+        if m.get("라벨"):
+            row["원문라벨"] = m["라벨"]
+        if v.get("출처"):
+            row["출처"] = v["출처"]
+        out.append(row)
+
+    # ── 주의는 **데이터에서 만든다**(문구를 지표마다 박지 않는다) ──
+    notes = []
+    units = {m.get("단위") for _c, _v, m in have if m.get("단위")}
+    if len(units) > 1:
+        notes.append(f"원문 단위가 회사마다 다릅니다({' · '.join(sorted(units))}). "
+                     f"순위는 원 단위로 환산해 매겼고 `값`은 원문 표기 그대로입니다.")
+    labels = {_re.sub(r"\s*\(.*?\)|\s*\[.*?\]", "", m.get("라벨", "")).strip()
+              for _c, _v, m in have if m.get("라벨")}
+    labels = {x for x in labels if x}
+    if len(labels) > 1:
+        notes.append(f"원문 계정명이 회사마다 다릅니다 — {' · '.join(sorted(labels))}. "
+                     f"같은 XBRL 개념이지만 업종에 따라 표기가 갈립니다. "
+                     f"답변에 각 회사의 `원문라벨`을 함께 밝히십시오.")
+    if key == "employees":
+        notes.append("직원수는 **그 법인**의 직원 수입니다. 지주회사는 그룹 전체가 "
+                     "아닙니다(예: KB금융 144명 · 메리츠금융지주 38명).")
+    if key == "market_cap":
+        notes.append("시가총액은 universe.csv의 2026-07-24 조회값입니다(공시 원문이 아닙니다).")
+
+    # `순위`를 맨 뒤에 둔다 — dict 삽입 순서가 곧 관측 순서다. 앞에 두면 관측 상한을
+    # 넘길 때 `제외`·`주의`부터 잘려 나간다(빠진 회사와 단위 경고가 먼저 사라진다).
+    res = {
+        "지표": f"{metric} ({key})",
+        "기준": f"{yr}년 사업보고서 · {data.get('scope', '연결')} 기준",
+        "정렬": "오름차순(작은 값이 1위)" if ascending else "내림차순(큰 값이 1위)",
+        "포함": len(have),
+        "모집단": len(pool),
+    }
+    if miss:
+        res["제외"] = {
+            "n": len(miss),
+            "기업": [f"{c} ({st})" if st else c for c, st in sorted(miss)],
+            "사유": "이 회사들의 사업보고서에 해당 항목이 없어 순위에서 뺐습니다. "
+                    "**그 회사가 그 활동을 하지 않는다는 뜻이 아닙니다** — 업종에 따라 "
+                    "계정 구조가 다릅니다. 답변에 제외 사실과 회사명을 밝히십시오."}
+    if notes or built_now:
+        res["주의"] = built_now + " ".join(notes)
+    res["순위"] = out
+    return res
+
+
+#: 비율 행 라벨. `율` 한 글자는 넣지 않는다 — `환율차이`·`환율변동`이 걸린다(실측 2건).
+_RATIO_ROW = _re.compile(r"비율|률")
+
+
 def _canon_norm(v, rows):
-    """비교 관측에 원 단위 환산을 병기한다 — 회사마다 표 단위가 다르다."""
+    """비교 관측에 원 단위 환산을 병기한다 — 회사마다 표 단위가 다르다.
+
+    ★ 표 단위가 `십억원, %`처럼 섞인 표가 있다. 금액 배수를 비율 행에까지 먹이면
+      KB금융 `고정이하여신비율` 0.99(%)가 "9억 9,000만원"으로 실린다(도구가 없는 수치를
+      만드는 셈이다). 판정은 `parse.py` 규율 그대로 — **단위에 `%`가 있을 때만 라벨을 본다.**
+      전수: 환산 3,992개 중 10개만 빠지고 전부 비율이다(금액 오탐 0).
+    """
     got = _amt_mult(v.get("unit"))
     if not got:
         return None
     _name, mult = got
+    mixed_unit = "%" in str(v.get("unit") or "")
     out = {}
     for r in rows[:8]:
+        if mixed_unit and _RATIO_ROW.search(str(r.get("label") or "")):
+            continue
         for k, x in (r.get("values") or {}).items():
             t = str(x or "").strip().replace(",", "")
             if not _re.fullmatch(r"-?\d+(?:\.\d+)?", t):
@@ -553,8 +740,8 @@ def get_financials(corp: str, year: int = None, month: int = 12,
                     for k, s in (r.get("series") or {}).items()}
     scope = r.get("scope") or ("연결" if consolidated else "별도")
     # 매출액 대비 비율은 **코드가 계산해 함께 준다.** `_fin_block`에만 붙였더니
-    ratios = _sales_ratios(vals, vals)
-    struct = _struct_ratios(vals)
+    ratios = _sales_ratios(vals, vals, krw)
+    struct = _struct_ratios(vals, krw)
     # 접수번호를 함께 준다 — 주최 답변 예시가 전부 접수번호를 인용한다.
     cite = _doctables._cite({"report_nm": r.get("period"), "rcept_no": r.get("rcept_no"),
                              "is_correction": r.get("is_correction")}) \
@@ -728,13 +915,13 @@ def _fin_block(corp, query, year=None):
                       for c in vals if r.get("series")},
            "note": "재무제표 표준 수치는 이 값이 정본입니다. 검색 결과의 표는 "
                    "연결·별도가 섞여 있으니 이 값을 우선하십시오."}
-    struct = _struct_ratios(r.get("values", {}))
+    struct = _struct_ratios(r.get("values", {}), krw)
     if struct:
         out["재무구조_비율"] = struct
         out["struct_note"] = ("위 비율은 **코드가 계산한 값**입니다"
                               "(부채비율=부채총계÷자본총계 · 자기자본비율=자본총계÷자산총계 · "
                               "유동비율=유동자산÷유동부채, 각 ×100). 직접 계산하지 마십시오.")
-    ratios = _sales_ratios(vals, r.get("values", {}))
+    ratios = _sales_ratios(vals, r.get("values", {}), krw)
     if ratios:
         out["매출액_대비_비율"] = ratios
         out["ratio_note"] = ("위 비율은 **코드가 계산한 값**입니다(항목÷매출액×100). "
@@ -761,11 +948,22 @@ _STRUCT_RATIO = (
 )
 
 
-def _struct_ratios(allvals):
+#: 비율의 두 항은 **같은 스케일**이어야 한다. `values`는 원문 표기 스케일이고 그 스케일이
+#: 한 회사 안에서도 개념마다 다르다(70사 중 13사). 종전에는 그대로 나눠 두 곳이 틀렸다 —
+#: 삼성화재(revenue만 백만원) 영업이익률 10,731,645.8% · 세아베스틸지주(sga만 천원)
+#: 판관비율 0.0%. `krw`가 **두 항 모두** 있을 때만 그것을 쓴다(하나만 섞으면 같은 버그다).
+def _same_scale(a_key, b_key, vals, krw):
+    krw = krw or {}
+    if krw.get(a_key) is not None and krw.get(b_key) is not None:
+        return krw[a_key], krw[b_key]
+    return vals.get(a_key), vals.get(b_key)
+
+
+def _struct_ratios(allvals, krw=None):
     """재무구조 비율(%). 필요한 두 항목이 다 있을 때만 낸다."""
     out = {}
     for name, num, den in _STRUCT_RATIO:
-        a, b = allvals.get(num), allvals.get(den)
+        a, b = _same_scale(num, den, allvals, krw)
         if a is None or not b:
             continue
         try:
@@ -775,15 +973,19 @@ def _struct_ratios(allvals):
     return out
 
 
-def _sales_ratios(asked, allvals):
-    """질의에 걸린 손익 항목의 **매출액 대비 비율(%)** — 코드가 계산한다."""
-    top = allvals.get("revenue")
-    if not top or top <= 0:
+def _sales_ratios(asked, allvals, krw=None):
+    """질의에 걸린 손익 항목의 **매출액 대비 비율(%)** — 코드가 계산한다.
+
+    `krw`(원 환산)를 받으면 그것으로 나눈다 — 이유는 `_same_scale` 주석에 있다.
+    """
+    if not allvals.get("revenue") or allvals["revenue"] <= 0:
         return {}
     out = {}
     for cid, name in _SALES_RATIO.items():
-        v = asked.get(cid)
-        if v is None:
+        if asked.get(cid) is None:
+            continue
+        v, top = _same_scale(cid, "revenue", allvals, krw)
+        if v is None or not top or top <= 0:
             continue
         try:
             out[name] = f"{v / top * 100:.1f}%"
@@ -1116,9 +1318,24 @@ _RATIO = {"opm": ("operating_income", "revenue"), "영업이익률": ("operating
 _GROWTH_SUFFIX = ("증가율", "성장률", "증감률", "growth", "yoy")
 
 
+#: 도구 **인자**용 개념 사전. `_ALIAS`와 분리한다 — `_ALIAS`는 질문 문자열을 최장일치로
+#: 훑는 데도 쓰여(`_fin_concepts`) 이름을 더하면 라우팅이 함께 흔들린다.
+#: 정본표가 받는 이름은 넣지 않는다(그 분기를 뺏는다). 실측: 한글 라벨 해소 24/92 → 84/92.
+@_lru_cache(maxsize=1)
+def _arg_alias():
+    out = {k.lower(): v for k, v in _ALIAS.items()}
+    for c in _K.ALL:
+        for lab in c.labels:
+            k = (lab or "").strip().lower()
+            if not k or k in out or _doctables.match(lab):
+                continue
+            out[k] = c.id
+    return out
+
+
 def _cid(concept):
     c = (concept or "").strip()
-    return _ALIAS.get(c, _ALIAS.get(c.lower(), c))
+    return _ALIAS.get(c) or _arg_alias().get(c.lower(), c)
 
 
 def _growth_base(concept):
@@ -1646,11 +1863,11 @@ def compare_companies(corps: list, concept: str, year: int = None,
     out = []
     for name in list(corps)[:10]:
         r = _finance.extract(name, year=year)
-        v = r["values"].get(concept)
-        u = (r.get("units") or {}).get(concept)
+        v = r["values"].get(cid)
+        u = (r.get("units") or {}).get(cid)
         # XBRL 경로엔 units가 없고 krw가 있다. 이걸 안 보면 백만원 표기 회사가
         # 원 단위 회사와 100만 배 차이로 나란히 서서 비교가 통째로 깨진다.
-        kr = (r.get("krw") or {}).get(concept)
+        kr = (r.get("krw") or {}).get(cid)
         if kr is None and v is not None:
             kr = v * ((u.scale if u else None) or 1)
         _c3 = (_doctables._cite({"report_nm": r.get("period"), "rcept_no": r.get("rcept_no"),
@@ -1662,9 +1879,9 @@ def compare_companies(corps: list, concept: str, year: int = None,
                     "value_raw": v,
                     "unit": (u.raw if u else _unit_label(r.get("values", {}),
                                                          r.get("krw", {}))),
-                    "status": r["status"].get(concept),
-                    "label": (_K.BY_ID[concept].labels[0]
-                              if concept in _K.BY_ID and _K.BY_ID[concept].labels
+                    "status": r["status"].get(cid),
+                    "label": (_K.BY_ID[cid].labels[0]
+                              if cid in _K.BY_ID and _K.BY_ID[cid].labels
                               else concept)})
     out.sort(key=lambda x: (x["value_krw"] is None, -(x["value_krw"] or 0)))
     return out

@@ -45,6 +45,10 @@ def run(verbose=True):
         if verbose:
             print(f"  {corp:12s} {time.time()-t1:6.1f}초  {note}  "
                   f"{os.path.basename(path)[:50]}")
+    n_rank, t_rank = rank_warm(verbose=verbose)
+    if verbose:
+        print(f"순위 배치 · 기업 {n_rank}사 · {t_rank:.1f}초")
+
     n_new, n_hit = canon_warm(verbose=verbose)
     if verbose:
         print(f"정본표 캐시 · 새로 만든 것 {n_new} · 이미 있던 것 {n_hit}")
@@ -54,6 +58,27 @@ def run(verbose=True):
         print(f"예열 완료 {total:.1f}초 · 남은 찬 PDF {len(cold(paths))}건 "
               f"· 찬 정본표 {len(canon_cold())}건")
     return total
+
+# ─────────────────────────────────────────────── 순위 배치
+def rank_cold(year=None):
+    """순위 배치가 비어 있으면 그 연도를 돌려준다."""
+    from agent2.data import rankings
+    yr = year or store.latest_fiscal_year()
+    return [] if rankings.load(yr) else [yr]
+
+
+def rank_warm(year=None, verbose=True):
+    """순위 배치를 채운다. (기업 수, 소요초). 이미 있으면 건드리지 않는다.
+
+    질의 시점에 만들면 15초 + 상주 900MB다(`data/rankings.py`).
+    """
+    from agent2.data import rankings
+    yr = year or store.latest_fiscal_year()
+    have = rankings.load(yr)
+    if have:
+        return have.get("corps", 0), 0.0
+    return rankings.build(yr, verbose=False)
+
 
 # ─────────────────────────────────────────────── 정본표 캐시
 
@@ -102,7 +127,9 @@ if __name__ == "__main__":
         for corp, p in todo:
             print(f"  찬 캐시 {corp} — {os.path.basename(p)[:60]}")
         print(f"정본표 {len(ckeys)}건 · 찬 것 {len(ctodo)}건")
-        if not todo and not ctodo:
+        rtodo = rank_cold()
+        print(f"순위 배치 · 찬 것 {len(rtodo)}건" + (f" {rtodo}" if rtodo else ""))
+        if not todo and not ctodo and not rank_cold():
             print("전부 예열됨 — 바로 서빙 가능")
     else:
         run()
