@@ -18,7 +18,7 @@ http://101.79.19.164/answer
 | 메서드 | `GET` (평가 경로) · `POST`도 지원 |
 | 인증·헤더 | 없음 |
 | 문자셋 | UTF-8 (`Content-Type: application/json; charset=utf-8`) |
-| 헬스체크 | `GET /health` → `{"status":"ok","agent":"2호기"}` |
+| 헬스체크 | `GET /health` → `{"status":"ok","agent":"dis-027"}` |
 
 ★ **헬스체크는 반드시 `GET`.** `HEAD /health`는 `501`을 낸다(§4). 모니터를 `HEAD`로 걸면
 멀쩡한 서버가 죽은 것으로 판정된다.
