@@ -227,9 +227,28 @@ _Q_PERIODIC = _re.compile(r"(20\d\d\s*년\s*[1-4]\s*분기|[1-4]\s*분기|반기
 
 
 def _question_periodic(question):
-    """질문이 지목한 분기·반기 표현. 사업보고서 질의면 None."""
+    """질문이 지목한 분기·반기 표현. 사업보고서 질의면 None.
+
+    한글로 못 찾으면 실무 표기(`3Q25`)를 한글로 되돌려 본다. 표기를 아는 곳은
+    `tools.quarter_notation` 하나다.
+    """
     m = _Q_PERIODIC.search(question or "")
-    return m.group(1) if m else None
+    return m.group(1) if m else _tools.quarter_notation(question)
+
+
+#: 분기 → 그 분기를 담는 보고서 종류. 코퍼스가 그렇게 생겼다.
+_SUBTYPE = {3: "quarter", 9: "quarter", 6: "half", 12: "annual"}
+
+
+def _question_qmonth(question):
+    """질문이 지목한 (연도, 월). 분기·반기가 없으면 (None, None)."""
+    ph = _question_periodic(question)
+    if not ph:
+        return None, None
+    q = _re.search(r"([1-4])\s*분기", ph)
+    mon = {1: 3, 2: 6, 3: 9, 4: 12}[int(q.group(1))] if q else 6      # 분기가 없으면 반기
+    y = _re.search(r"(20\d\d)\s*년", ph)
+    return (int(y.group(1)) if y else None), mon
 
 _ASSIST_TOOLS = ("get_financials", "list_filings", "list_sections", "find_sections")
 ASSIST_BUDGET = 2000
@@ -239,7 +258,10 @@ def _assist_year(question):
     """질문이 지목한 (연도, subtype, month). 다년 비교면 연도는 None."""
     ys = {int("20" + m) for m in _re.findall(r"20(\d\d)\s*년", question or "")}
     sub, mon = _tools._periodic_of(question or "")
-    return (ys.pop() if len(ys) == 1 else None), sub, mon
+    year = ys.pop() if len(ys) == 1 else None
+    if year is None:                       # `3Q25`는 `20NN년` 표기가 없다
+        year, _ = _question_qmonth(question)
+    return year, sub, mon
 
 
 def _canon_assist(name, args, question, out=None):
@@ -259,7 +281,9 @@ def _canon_assist(name, args, question, out=None):
     c = _facts.company(corp)
     nm = c["corp_name"] if c else corp
     if year is None and sub != "annual":
-        year = _store.latest_base_year(nm, sub)
+        # 월을 넘긴다 — 안 넘기면 quarter 최신이 늘 2026이라 3분기가 빈손이 된다.
+        year = (_store.latest_base_year(nm, sub, month=mon)
+                or _store.latest_base_year(nm, sub))
     out = {}
     for tid in ids[:2]:
         try:
@@ -281,6 +305,17 @@ def _with_period(name, args, question):
         # 도구 query가 이미 분기를 말하면 건드리지 않는다(모델이 옳게 골랐다).
         if ph and not _Q_PERIODIC.search(str(args["query"])):
             args = {**args, "query": f'{args["query"]} {ph}'}
+    # `get_financials`는 분기를 `month` 인자로만 받는다 — 빠뜨리면 기본값 12(사업보고서)로
+    # 조용히 떨어진다. 되받이일 뿐이라 보고서가 실제로 있을 때만 넣는다.
+    if name == "get_financials" and not args.get("month"):
+        y, mon = _question_qmonth(question)
+        if mon and args.get("corp"):
+            yy = args.get("year") or y
+            if _store.docs(corp=args["corp"], doc_subtype=_SUBTYPE[mon],
+                           base_year=yy, base_month=mon):
+                args = {**args, "month": mon}
+                if yy and not args.get("year"):
+                    args["year"] = yy
     if name not in _PERIOD_TOOLS:
         return args
     if args.get("start") or args.get("end"):

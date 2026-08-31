@@ -1635,7 +1635,9 @@ def find_tables(corp: str, query: str, year: int = None, k: int = 4,
     base = year or _store.latest_fiscal_year(name) or 0
     sub, mon = _periodic_of(query)
     if not year and sub != "annual":
-        base = _store.latest_base_year(name, sub) or base
+        # 그 분기를 가진 보고서 중에서 최신을 고른다. 없으면 종류 기준 최신으로 물러난다.
+        base = (_store.latest_base_year(name, sub, month=mon)
+                or _store.latest_base_year(name, sub) or base)
     matched = _doctables.match(query)
     found = [(y, v) for tid in matched
              for y in range(base - years + 1, base + 1)
@@ -1675,6 +1677,32 @@ def find_tables(corp: str, query: str, year: int = None, k: int = 4,
 
 KEEP_TOP_SNIPPET = (_os.environ.get("A2_KEEP_TOP") or "0") != "0"
 
+#: 실무 표기 `3Q25` → 한글 분기. 현직자는 분기를 이렇게 쓴다.
+#: 되돌린 뒤 아래 `_PERIODIC_Q`를 그대로 타므로 분기→보고서 매핑은 한 곳뿐이다.
+_Q_NOTATION = (
+    # (패턴, 연도그룹, 분기그룹)
+    (_re.compile(r"(?<![A-Za-z0-9])((?:20)?\d{2})\s*년?\s*([1-4])[Qq](?![A-Za-z0-9])"), 1, 2),
+    (_re.compile(r"(?<![A-Za-z0-9])([1-4])[Qq]['’]?((?:20)?\d{2})(?![0-9])"), 2, 1),
+    (_re.compile(r"(?<![A-Za-z0-9])[Qq]([1-4])[\s'’]*((?:20)?\d{2})(?![0-9])"), 2, 1),
+    (_re.compile(r"(?<![A-Za-z0-9])([1-4])[Qq](?![A-Za-z0-9])"), None, 1),
+    (_re.compile(r"(?<![A-Za-z0-9])[Qq]([1-4])(?![A-Za-z0-9])"), None, 1),
+)
+
+
+def quarter_notation(text):
+    """`3Q25` 꼴 표기 → `2025년 3분기`. 연도가 없으면 `3분기`. 없으면 None."""
+    for pat, gy, gq in _Q_NOTATION:
+        m = pat.search(str(text or ""))
+        if not m:
+            continue
+        q = m.group(gq)
+        if gy is None:
+            return f"{q}분기"
+        y = m.group(gy)
+        return f"{'20' + y if len(y) == 2 else y}년 {q}분기"
+    return None
+
+
 _PERIODIC_Q = (
     (_re.compile(r"1\s*분기|첫\s*분기"), ("quarter", 3)),
     (_re.compile(r"3\s*분기"), ("quarter", 9)),
@@ -1688,6 +1716,9 @@ _PERIODIC_Q = (
 def _periodic_of(query):
     """질의가 지목한 정기공시 종류. 없으면 사업보고서(`annual`)다."""
     q = str(query or "")
+    # 모델이 사용자 표기(`3Q25`)를 도구 인자에 그대로 옮겨 적는 경우가 있다.
+    if not any(pat.search(q) for pat, _ in _PERIODIC_Q):
+        q += " " + (quarter_notation(q) or "")
     for pat, (sub, mon) in _PERIODIC_Q:
         if pat.search(q):
             return sub, mon
