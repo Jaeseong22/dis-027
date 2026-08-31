@@ -1711,10 +1711,13 @@ def find_tables(corp: str, query: str, year: int = None, k: int = 4,
     for i, h in enumerate(hits[:3 if has_canon else k]):
         sec = " > ".join(h.unit.section_path[-2:])
         body = (not has_canon) or (KEEP_TOP_SNIPPET and i == 0)
+        _c = _hit_cite(h.unit)
         rest.append({"section": sec, "score": round(h.score, 2), "source": "검색",
+                     **({"출처": _c} if _c else {}),
                      "html": h.unit.table.to_html(max_rows=25) if h.unit.table else ""}
                     if body else
-                    {"section": sec, "score": round(h.score, 2), "source": "검색(목록)"})
+                    {"section": sec, "score": round(h.score, 2), "source": "검색(목록)",
+                     **({"출처": _c} if _c else {})})
     if fin:
         rest.append(fin)
     rest = alt + rest
@@ -1776,6 +1779,25 @@ def _periodic_of(query):
     return "annual", None
 
 
+@_lru_cache(maxsize=1)
+def _doc_by_id():
+    """{doc_id: manifest 행}. 검색 단위가 doc_id 만 들고 오므로 여기서 되짚는다."""
+    return {r["doc_id"]: r for r in _store.manifest()}
+
+
+def _hit_cite(unit):
+    """검색 단위 → `사업보고서 (2025.12), 접수번호 …`. 못 만들면 None.
+
+    정본표·재무값만 `출처`를 달았고 **검색 본문만 나가는 관측은 근거가 통째로 빠졌다**
+    (실측 25사 × 5질의: 검색만 한 관측 29/81 = 35.8%). 그래서 답변에 근거가 없고
+    모델이 보고서 종류를 추측했다. 평가지표 8이 직접 걸리는 자리다.
+    재료는 이미 있었다 — `search.Unit.doc_id`가 접수번호를 담는다.
+    표기는 `doctables._cite` 하나만 쓴다(형식을 두 곳에 두면 어긋난다).
+    """
+    row = _doc_by_id().get(getattr(unit, "doc_id", None))
+    return _doctables._cite(row) if row else None
+
+
 @tool("1-2", "1-13", "2-2", "2-3", "2-4", "2-5", "2-6", "2-7")
 
 
@@ -1814,9 +1836,12 @@ def find_sections(corp: str, query: str, year: int = None, k: int = 4) -> list: 
     for i, h in enumerate(hits[:3] if has_canon else hits):
         sec = " > ".join(h.unit.section_path[-2:])
         body = (not has_canon) or (KEEP_TOP_SNIPPET and i == 0)
+        _c = _hit_cite(h.unit)
         rest.append({"section": sec, "score": round(h.score, 2), "source": "검색",
+                     **({"출처": _c} if _c else {}),
                      "text": h.unit.text[:_SNIPPET]} if body else
-                    {"section": sec, "score": round(h.score, 2), "source": "검색(목록)"})
+                    {"section": sec, "score": round(h.score, 2), "source": "검색(목록)",
+                     **({"출처": _c} if _c else {})})
     if fin:
         rest.append(fin)
     # 섹션이 차지할 자리를 **미리 반영해** 표 예산을 잡는다. 안 그러면 나중에
