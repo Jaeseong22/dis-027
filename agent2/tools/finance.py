@@ -391,7 +391,9 @@ def series(corp, concept_id, years=3, month=12, consolidated=True):
     for y in range(latest - years + 1, latest + 1):
         rr = extract(c["corp_name"], y, month, consolidated)
         if concept_id in rr["values"]:
-            out[y] = rr["values"][concept_id]
+            # 원으로 맞춰 담는다 — 이 경로는 연도마다 다른 문서를 읽어 표 단위가 갈릴 수 있다.
+            u = (rr.get("units") or {}).get(concept_id)
+            out[y] = rr["values"][concept_id] * (getattr(u, "scale", None) or 1)
     return out
 
 

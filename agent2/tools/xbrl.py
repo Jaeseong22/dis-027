@@ -332,15 +332,42 @@ def scale_conflict(fs, concept, scope=CONSOLIDATED, year=None):
     return False, None
 
 
+#: series 가 받아들일 컨텍스트 차원 상한. `2` 이상은 주석 표의 세부 항목이다.
+#: 전수 실측(대조 8,304건): 버린 85건 중 정답 0건 · 오답 84건.
+_SERIES_MAX_DIM = 2
+
+#: series 의 한 해가 당해 연도와 벌어져도 되는 배수 상한.
+#: 원천의 `ADECIMAL`이 틀린 주석 셀이 차원 없이 들어 있어 `_SERIES_MAX_DIM`으로 안 걸린다.
+#: 임계는 실측으로 골랐다 — 100은 정답 20건, 300은 8건을 잃고 **1,000에서 0**이 된다.
+_SERIES_MAX_RATIO = 1e3
+
+
 def series(fs, concept, scope=CONSOLIDATED, span=None):
-    """{연도: 값} — 한 보고서에 당기·전기·전전기가 함께 실려 있어 3개년이 한 번에 나온다.
+    """{연도: **원 단위 값**} — 한 보고서에 당기·전기·전전기가 함께 실려 3개년이 나온다.
 
     ★ 분기·반기에서는 `span`을 줘야 연도끼리 기준이 어긋나지 않는다.
+
+    ★★ **`value`가 아니라 `krw`를 담는다.** 같은 문서 안에서도 연도마다 `ADECIMAL`이
+      다른데(본표 `0` · 주석 `-6`) 표시하는 쪽은 당해 연도로 잡은 단위 하나를 모든 연도에
+      붙인다. 그래서 `유형자산 2023 4,062,170 원 / 2024 4,648,353,653,506 원`처럼
+      배율이 10⁶ 차이나는 값에 같은 라벨이 붙었다. 원으로 담으면 구조적으로 못 어긋난다.
     """
-    out = {}
+    picked = {}
     for f in candidates(fs, concept, scope, year=None, span=span):
-        if f.year is not None and f.year not in out:
-            out[f.year] = f.value
+        if dim_count(f.ctx) >= _SERIES_MAX_DIM:
+            continue
+        if f.year is not None and f.year not in picked:
+            picked[f.year] = f
+    if not picked:
+        return {}
+    base = picked[max(picked)]                 # 당해 연도 = `values`가 쓰는 그 값
+    out = {}
+    for y, f in picked.items():
+        if base.krw and f.krw:
+            r = max(abs(f.krw), abs(base.krw)) / min(abs(f.krw), abs(base.krw))
+            if r >= _SERIES_MAX_RATIO:
+                continue                       # 같은 항목이 아니다 — 값을 짓지 말고 뺀다
+        out[y] = f.krw
     return dict(sorted(out.items()))
 
 

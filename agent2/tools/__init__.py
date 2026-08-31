@@ -736,7 +736,11 @@ def get_financials(corp: str, year: int = None, month: int = 12,
                   if vals.get(k) and krw.get(k) else unit)
               for k in vals}
     shown = {k: _money_str(v, cunits.get(k)) for k, v in vals.items()}
-    shown_series = {k: {y: _money_str(x, cunits.get(k)) for y, x in (s or {}).items()}
+    # series 는 원으로 온다(`xbrl.series`). 표시 단위는 개념별 `cunits[k]` 하나이므로
+    # 같은 배율로 나눠야 모든 연도가 그 라벨과 맞는다.
+    _cscale = {k: (krw[k] / vals[k]) if vals.get(k) and krw.get(k) else 1 for k in vals}
+    shown_series = {k: {y: _money_str(x / (_cscale.get(k) or 1), cunits.get(k))
+                        for y, x in (s or {}).items() if x is not None}
                     for k, s in (r.get("series") or {}).items()}
     scope = r.get("scope") or ("연결" if consolidated else "별도")
     # 매출액 대비 비율은 **코드가 계산해 함께 준다.** `_fin_block`에만 붙였더니
@@ -1236,6 +1240,12 @@ _SCALE_LABEL = {1: "원", 1000: "천원", 1000000: "백만원",
                 100000000: "억원", 1000000000000: "조원"}
 
 
+def _concept_scale(corp, cid):
+    """`_concept_unit`이 돌려준 라벨의 배율. 없으면 1. series 가 원이라 표시할 때 나눈다."""
+    lab = _concept_unit(corp, cid)
+    return {v: k for k, v in _SCALE_LABEL.items()}.get(lab, 1)
+
+
 def _concept_unit(corp, cid):
     """**개념 하나**의 표시 단위. 없으면 None."""
     c = _facts.company(corp)
@@ -1570,11 +1580,12 @@ def financial_series(corp: str, concept: str, years: int = 3) -> dict:
     _cite2 = (_doctables._cite({"report_nm": _fr.get("period"), "rcept_no": _fr.get("rcept_no"),
                                 "is_correction": _fr.get("is_correction")})
               if _fr.get("rcept_no") else None)
+    _sc = _concept_scale(corp, cid) or 1        # series 는 원 · 표시는 `unit` 배율
     out = {"개념": cid, "단위": unit,
            **({"출처": _cite2} if _cite2 else {}),
-           "연도별": {y: _money_str(v[y], unit) for y in ys[-years:]},
+           "연도별": {y: _money_str(v[y] / _sc, unit) for y in ys[-years:]},
            "전년대비증감률": {y: _pct_str(x) for y, x in g.items()},
-           "최신값": _money_str(v.get(last), unit),
+           "최신값": _money_str(v[last] / _sc if last in v else None, unit),
            "최신연도": last,
            "최신증감률": _pct_str(g.get(last))}
     if cid in _CF_CONCEPTS:
@@ -1933,11 +1944,11 @@ def compare_companies(corps: list, concept: str, year: int = None,
         for name in list(corps)[:10]:
             c = _facts.company(name)
             nm = c["corp_name"] if c else name
+            # `finance.series`가 원으로 준다. 종전 라벨은 당해 연도 기준이라
+            # 연도마다 스케일이 갈리면 그대로 틀렸다. 비교는 정규화가 원칙이다.
             out.append({"corp": nm, "concept": cid,
                         "series": _finance.series(nm, cid, years=years),
-                        "unit": (_finance.extract(nm, year=year) or {}).get("units", {})
-                                and _unit_label(_finance.extract(nm, year=year)["values"],
-                                                _finance.extract(nm, year=year).get("krw", {}))})
+                        "unit": "원"})
         return out
     out = []
     for name in list(corps)[:10]:
