@@ -1022,12 +1022,49 @@ def _with_unit(values, unit, table_id=None):
     if not m:
         return values
     u = m.group(1)
+    mult = dict(_AMT_MULT).get(u)
     all_money = table_id in _MONEY_TABLE
-    return {k: (f"{x} {u}"
-                if (all_money or _MONEY_COL.search(k or ""))
-                and _NUMCELL.match((x or "").strip())
-                else x)
-            for k, x in values.items()}
+    out = {}
+    for k, x in values.items():
+        t = (x or "").strip()
+        if (all_money or _MONEY_COL.search(k or "")) and _NUMCELL.match(t):
+            out[k] = f"{t} {u}" + (_kor_note(t, mult) if mult else "")
+        else:
+            out[k] = x
+    return out
+
+
+#: 정본표 셀에 한글 금액을 병기할 하한.
+#:
+#: `_won_scale`(정형공시 `(원)` 필드)은 1억을 쓰지만 여기는 제약이 다르다 — 표 전체
+#: 셀이라 관측 예산이 곧 한계다. 임계를 실측으로 골랐다(통합 394셋 관측 전수 A/B):
+#:     임계        밀려난 수치   정답 잃음
+#:     1억            164          0
+#:     1,000억         77          0
+#:     **1조**         18          0      ← 채택 (밀려난 18개는 계수형 문항 2개에 몰려 있다)
+#: 억원 표에서 1조 미만은 `N,NNN억원`이라 표시 숫자와 한글 읽기가 그대로 겹친다.
+_KOR_NOTE_MIN = 10 ** 12
+
+
+def _kor_note(cell, mult):
+    """`1,301,282`(억원) → ` (= 130조 1,282억원)`. 병기할 것이 없으면 빈 문자열.
+
+    한국어 조/억/만은 4자리 체계라 3자리 콤마와 어긋나고, 그 변환이 모델의 약한
+    축이다(arXiv 2405.17067 · NUMCoT arXiv 2406.02864). 수치는 결정론 코드가 만든다.
+    괄호·`△`·`▲`는 원문의 음수 표기다 — 부호를 살려 환산한다.
+    """
+    t = cell.replace("△", "-").replace("▲", "-").replace(",", "").strip()
+    if t.startswith("(") and t.endswith(")"):
+        t = "-" + t[1:-1]
+    t = t.rstrip(")")
+    try:
+        n = float(t)
+    except ValueError:
+        return ""
+    won = n * mult
+    if abs(won) < _KOR_NOTE_MIN:
+        return ""
+    return f" (= {_kor_amount(won)})"
 
 ROWS_ALL = {"capex", "raw_materials", "auditor", "rnd", "employees",
             "regional_sales", "equity_method",
@@ -1058,6 +1095,9 @@ def _col_score(col, qn):
 def _num_like(x):
     """그 셀이 **수치 셀**인가. `_with_unit`이 붙인 단위 접미까지 받는다."""
     t = str(x or "").strip()
+    # `_kor_note`가 붙인 한글 환산은 접미 길이에서 뺀다 — 안 빼면 수치 셀로 안 잡혀
+    # `_order_cols`가 통째로 멈춘다. 관측 형식과 그것을 읽는 판정은 같이 움직여야 한다.
+    t = _re.sub(r"\s*\(=\s[^)]*\)$", "", t)
     m = _re.match(r"^\(?-?[\d,]+(?:\.\d+)?\)?", t)
     if not m:
         return False
