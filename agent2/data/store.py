@@ -225,9 +225,15 @@ def latest_fiscal_year(corp=None):
     return max(ys) if ys else None
 
 
-def latest_base_year(corp=None, subtype="annual"):
-    """그 **보고서 종류**가 보유한 최신 base_year."""
-    ys = [r.get("base_year") for r in docs(corp=corp, doc_subtype=subtype)
+def latest_base_year(corp=None, subtype="annual", month=None):
+    """그 **보고서 종류·그 분기**가 보유한 최신 base_year.
+
+    ★ `month`를 안 보면 3분기가 죽는다. quarter 최신은 2026인데 코퍼스의 2026
+      정기공시는 1분기뿐이라(quarter 9월은 2023~2025) 3분기 질의가 없는
+      (2026, 9월)을 찾는다.
+    """
+    ys = [r.get("base_year")
+          for r in docs(corp=corp, doc_subtype=subtype, base_month=month)
           if r.get("base_year")]
     return max(ys) if ys else None
 

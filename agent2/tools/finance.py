@@ -249,10 +249,8 @@ def extract(corp, year=None, month=12, consolidated=True, _use_xbrl=True):
     #   전용(=2025)이라, `year` 생략 + `month=3` 이면 2026년 1분기를 물어도 2025.03을 열었다.
     year_inferred = year is None
     if year is None:
-        ys = [r["base_year"] for r in store.docs(corp=c["corp_name"],
-                                                 doc_subtype=subtype, base_month=month)
-              if r.get("base_year")]
-        year = max(ys) if ys else store.latest_fiscal_year(c["corp_name"])
+        year = (store.latest_base_year(c["corp_name"], subtype, month=month)
+                or store.latest_fiscal_year(c["corp_name"]))
     docs = store.docs(corp=c["corp_name"], doc_subtype=subtype,
                       base_year=year, base_month=month)
     if not docs:
