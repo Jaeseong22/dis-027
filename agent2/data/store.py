@@ -74,16 +74,98 @@ def _norm(s):
     return (nfc(str(s or "")).replace(" ", "").replace("·", "").replace("ㆍ", "")
             .replace(".", "").replace(",", "").lower())
 
-_ENG_SUFFIX = re.compile(r"(?:[,\s]|\b)(?:co\.?,?\s*ltd\.?|corporation|corp\.?|inc\.?|"
-                         r"company|limited|holdings?|group)\.?\s*$", re.I)
+#: 영문 법인격 표기. ★ 단독형(`CO`·`LTD.`)과 `CO,.LTD`(쉼표가 앞에 오는 오탈자성 표기)를
+#: 넣었다 — universe 실측에 그 셋이 다 있는데 종전 대안은 `co+ltd` 붙은 꼴만 받았다.
+#: 그래서 `Samsung Electronics`(universe: `SAMSUNG ELECTRONICS CO,.LTD`)·
+#: `Hyundai Motor`(`HYUNDAI MOTOR CO`)·`LG Energy Solution`(`LG ENERGY SOLUTION, LTD.`)이
+#: 회사가 **스스로 밝힌 영문명**인데도 해소되지 않았다.
+_ENG_SUFFIX = re.compile(r"(?:[,\s]|\b)(?:co[.,\s]*,?\s*ltd\.?|corporation|corp\.?|"
+                         r"incorporation|inc\.?|company|co\.?|limited|ltd\.?|"
+                         r"holdings?|group)\.?\s*$", re.I)
 
 
 def _strip_eng_suffix(s):
     prev, t = None, str(s or "").strip()
     while t != prev and len(t) > 2:
         prev = t
-        t = _ENG_SUFFIX.sub("", t).strip().strip(",").strip()
+        t = _ENG_SUFFIX.sub("", t).strip().strip(",").strip(".").strip()
     return t
+
+
+#: 로마자 한 글자의 한글 음차. 사명 앞토막이 이니셜일 때만 쓴다.
+_LETTER = {"a": "에이", "b": "비", "c": "씨", "d": "디", "e": "이", "f": "에프",
+           "g": "지", "h": "에이치", "i": "아이", "j": "제이", "k": "케이", "l": "엘",
+           "m": "엠", "n": "엔", "o": "오", "p": "피", "q": "큐", "r": "알",
+           "s": "에스", "t": "티", "u": "유", "v": "브이", "w": "더블유",
+           "x": "엑스", "y": "와이", "z": "지"}
+
+#: 이니셜로 볼 로마자 토막 — 2~3자이고 **바로 뒤가 한글이거나 끝**일 때만.
+#: 4자 이상은 이니셜이 아니라 단어다(`NAVER`·`POSCO`는 음차하면 안 된다).
+_HEAD_ROMAN = re.compile(r"^([A-Za-z]{2,3})(?=[가-힣]|$)")
+
+#: 영문명 **선두 토큰**이 2~3자 대문자면 그것이 이 회사의 이니셜이다.
+_ENG_INITIAL = re.compile(r"^([A-Z]{2,3})(?=[\s.,]|$)")
+
+
+def _roman_to_kr(name):
+    """`LG이노텍` → `엘지이노텍`. 이니셜이 아니면 None."""
+    m = _HEAD_ROMAN.match(str(name or ""))
+    if not m:
+        return None
+    return "".join(_LETTER[c] for c in m.group(1).lower()) + name[m.end():]
+
+
+def _initial_variants(corp_name, eng_name):
+    """이니셜 ↔ 음차 상호 표기. **영문명이 밝힌 이니셜만** 쓴다.
+
+    ★ 종전에는 한글 이름 앞 3음절을 음차로 **탐욕적으로** 되읽었는데, 그러면
+      `와이지엔터테인먼트`에서 `엔`까지 이니셜로 읽어 `YGN터테인먼트`라는 기형 키가
+      나왔고 `에스엠`은 2자 로마자 키 `sm`을 만들어 코퍼스 밖 문장(`SM 6 판매량`)을
+      오탐했다. 어디까지가 이니셜인지는 추측할 것이 아니라 영문명이 이미 말해 준다.
+    """
+    m = _ENG_INITIAL.match(str(eng_name or "").strip())
+    if not m:
+        return ()
+    ini = m.group(1)
+    kr = "".join(_LETTER[c] for c in ini.lower())
+    name = str(corp_name or "")
+    if name.upper().startswith(ini):                 # `LG이노텍` → `엘지이노텍`
+        out = kr + name[len(ini):]
+    elif _norm(name).startswith(_norm(kr)):          # `엘에스일렉트릭` → `LS일렉트릭`
+        out = ini + name[len(kr):]
+    else:
+        return ()
+    # 로마자만 2자인 키는 만들지 않는다 — 영문 낱말 안에 그대로 박힌다(`sm`).
+    k = _norm(out)
+    if len(k) < 3 or (k.isascii() and len(k) < 3):
+        return ()
+    return (out,)
+
+
+@lru_cache(maxsize=1)
+def _aliases():
+    """`data/aliases.csv` — 사람이 확인한 별칭만. 규칙으로 유도 못 하는 표기가 여기 온다.
+
+    규칙(영문 접미사·음차)으로 만들 수 있는 것은 넣지 않는다. 여기 있는 것은
+    구 사명(`기아자동차`→`기아`)·통용 약칭(`하이닉스`→`SK하이닉스`)처럼 **코퍼스
+    데이터에서 유도할 수 없는** 매핑뿐이고, 각 행이 `note`에 근거를 달고 있다.
+
+    ★ 종전에는 `_prefix_corp`(유일 접두)가 이 자리를 대신했는데, 같은 규칙이
+      `카카`→카카오 · `이마`→이마트 · `셀트리`→셀트리온 같은 **잘린 오표기 14종**을
+      함께 통과시켰다(70사 전수 실측). 정상 통용명과 잘림은 꼬리 길이로도
+      출현빈도로도 갈리지 않는다 — `미래에셋|증권`(꼬리 1회)을 살리면
+      `현대모|비스`(1회)도 살아난다. 그래서 규칙을 버리고 데이터로 옮겼다.
+    """
+    out = {}
+    try:
+        with open(config.ALIASES_CSV, encoding="utf-8-sig", newline="") as fh:
+            for r in csv.DictReader(fh):
+                a, c = nfc((r.get("alias") or "").strip()), nfc((r.get("corp_name") or "").strip())
+                if a and c:
+                    out[a] = c
+    except OSError:
+        return {}
+    return out
 
 
 #: 한국 법인 상용구. 전치(`주식회사 카카오`)·후치(`네이버(주)`) 둘 다 쓰인다.
@@ -143,60 +225,84 @@ def _filed_names():
 
 
 @lru_cache(maxsize=1)
-def _corp_index():
-    """법인명·통용명·영문명(+접미사 제거)·종목코드·법인코드·**원문 상호** → 마스터 행.
+def _index_parts():
+    """(색인, **별칭에서만 온 키**). 뒤엣것을 따로 주는 이유는 질의 매칭 방식이 달라서다.
 
-    ★ 순서가 곧 우선순위다 — universe 가 준 이름을 먼저 넣고 원문 상호를 뒤에 붙인다.
+    `clarify.corps_in`은 조사가 붙어도 잡으려고 부분문자열로 본다. 그 방식은 정식
+    사명에는 안전하지만 **약칭 별칭에는 위험하다** — 별칭이 형제사 이름의 앞토막이라
+    다른 회사를 잡는다. 실측:
+        포스코퓨처엠 → POSCO홀딩스 · 하나금융투자 → 하나금융지주 ·
+        미래에셋생명 → 미래에셋증권 · 에코프로에이치엔 → 에코프로비엠 · KAIST → 한국항공우주
+    그래서 별칭 키는 질의 쪽에서 **토큰 전체가 일치할 때만** 인정한다.
+    `resolve_corp`(문자열 전체 일치)에는 이 구분이 필요 없다.
+    """
+    idx, before = _build_index()
+    return idx, frozenset(k for k in idx if k not in before)
+
+
+@lru_cache(maxsize=1)
+def _corp_index():
+    return _index_parts()[0]
+
+
+def alias_keys():
+    """별칭에서만 생긴 색인 키. 부분문자열로 쓰면 안 되는 것들이다."""
+    return _index_parts()[1]
+
+
+def _build_index():
+    """법인명·통용명·영문명(+접미사 제거)·종목코드·법인코드·**원문 상호**·음차·별칭 → 마스터 행.
+
+    ★ 순서가 곧 우선순위다 — universe 가 준 이름을 먼저 넣고 원문 상호·음차를 뒤에 붙인다.
+    음차(`_initial_variants`)는 매핑을 지어내는 것이 아니라 **영문명이 밝힌 이니셜**을
+    한글로 읽는 규칙이다. 어디까지가 이니셜인지는 영문명 선두 토큰이 결정한다.
     """
     idx = {}
+
+    def put(key, row):
+        for k in (_norm(key), _strip_kr_form(_norm(key))):
+            if len(k) >= 2:
+                idx.setdefault(k, row)
+
     for r in universe():
         for key in (r["corp_name"], r["listed_name"], r["corp_eng_name"],
                     _strip_eng_suffix(r["corp_eng_name"]),
                     r["stock_code"], r["corp_code"]):
-            if not key:
-                continue
-            for k in (_norm(key), _strip_kr_form(_norm(key))):
-                if len(k) >= 2:
-                    idx.setdefault(k, r)
+            if key:
+                put(key, r)
+        for v in _initial_variants(r["corp_name"], r["corp_eng_name"]):
+            put(v, r)
     for corp, names in _filed_names().items():
         r = idx.get(_norm(corp))
         if r is None:
             continue
         for nm in names:
-            k = _strip_kr_form(_norm(nm))
-            if len(k) >= 2:
-                idx.setdefault(k, r)
-    return idx
-
-
-#: 접두 해소의 최소 길이. 1자로는 무엇이든 걸린다.
-_PREFIX_MIN = 2
-
-
-def _prefix_corp(k):
-    """접두가 **정확히 한 회사**에만 걸릴 때만 해소한다. 둘 이상이면 None.
-
-    모델이 회사명을 줄여 부른다 — `하나금융`·`우리금융`으로 부르면 코퍼스명
-    `하나금융지주`·`우리금융지주`에 닿지 못한다. 모호하면 회사를 고르는 것이
-    지어내는 것이므로 해소하지 않는다(전수 70사: 법인 접미를 뗀 형태 10개 중 9개가
-    유일하고, `삼성`·`현대`·`LG`처럼 여러 개가 걸리는 접두는 되묻기 게이트가 받는다).
-    """
-    if len(k) < _PREFIX_MIN:
-        return None
-    hit = [c for c in universe() if _norm(c["corp_name"]).startswith(k)]
-    return hit[0] if len(hit) == 1 else None
+            put(nm, r)
+            v = _roman_to_kr(nm)                    # 원문 상호가 이니셜로 시작하면 음차도
+            if v and len(_norm(v)) >= 3:
+                put(v, r)
+    before = frozenset(idx)                        # 별칭 이전의 키 — 어느 것이 별칭발인지
+    for alias, corp in _aliases().items():          # 사람이 확인한 매핑을 마지막에
+        r = idx.get(_norm(corp))
+        if r is not None:
+            put(alias, r)
+    return idx, before
 
 
 def resolve_corp(q):
-    """기업 해소. 못 찾으면 None(억지로 채우지 않는다).
+    """기업 해소. **정확 일치만** 인정한다. 못 찾으면 None(억지로 채우지 않는다).
 
     질의 쪽에서도 법인 상용구를 뗀다 — `(주)이마트`·`주식회사 카카오`로 물어도 걸린다.
-    정확 일치가 없으면 **유일한 접두**까지만 인정한다(`_prefix_corp`).
+
+    ★ 종전에 있던 `_prefix_corp`(유일 접두)를 뺐다. 잘린 이름을 회사로 채워 주는데,
+      그것이 곧 **오표기에 답하는 것**이다. 70사 전수 실측으로 `카카`→카카오 ·
+      `이마`→이마트 · `셀트리`→셀트리온 · `SK하이닉`→SK하이닉스 등 14종이 통과했다.
+      규칙이 살리던 정상 통용명 10종(`하나금융`·`미래에셋`·`삼성바이오`…)은
+      `data/aliases.csv`로 옮겼다 — 근거가 행마다 남고 오표기는 따라오지 않는다.
     """
     idx = _corp_index()
     k = _norm(q)
-    return (idx.get(k) or idx.get(_strip_kr_form(k))
-            or _prefix_corp(k) or _prefix_corp(_strip_kr_form(k)))
+    return idx.get(k) or idx.get(_strip_kr_form(k))
 
 
 def docs(corp=None, doc_group=None, doc_subtype=None, base_year=None,

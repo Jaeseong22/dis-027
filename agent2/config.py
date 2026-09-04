@@ -10,6 +10,9 @@ RAW_DIR = os.path.join(CORPUS_DIR, "raw")
 UNIVERSE_CSV = os.path.join(CORPUS_DIR, "universe.csv")
 MANIFEST_JSONL = os.path.join(CORPUS_DIR, "manifest.jsonl")
 
+#: 사람이 확인한 기업 별칭. 코퍼스가 아니라 **저장소** 자산이다(주최 제공물이 아니다).
+ALIASES_CSV = os.path.join(AGENT_DIR, "data", "aliases.csv")
+
 EXPECT = {
     "corps": 70,
     "docs": 4204,

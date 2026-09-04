@@ -128,10 +128,21 @@ def corps_in(question):
 
     부분문자열 매칭은 과잉 탐지 쪽으로 틀린다 — 그 방향이 안전하다(게이트가 안 걸린다).
     실측: 정답확정 757행 전수에서 미탐 0건.
+
+    ★ **별칭 키만 예외다.** 약칭 별칭(`포스코`·`하나금융`·`KAI`)은 형제사 이름의
+      앞토막이라 부분문자열로 보면 다른 회사를 잡는다 — `포스코퓨처엠`이
+      POSCO홀딩스로, `KAIST`가 한국항공우주로 걸렸다. 그래서 별칭은 조사를 뗀
+      **토큰 전체**가 일치할 때만 인정한다. 기존 키의 동작은 그대로 둔다.
     """
     n = _store._norm(question or "")
     idx = _store._corp_index()
-    return sorted({idx[k]["corp_name"] for k in _corp_keys() if k in n})
+    al = _store.alias_keys()
+    out = {idx[k]["corp_name"] for k in _corp_keys() if k not in al and k in n}
+    for tok in _bare_tokens(question):
+        k = _store._norm(tok)
+        if k in al:
+            out.add(idx[k]["corp_name"])
+    return sorted(out)
 
 
 def axes_in(question):
@@ -150,8 +161,37 @@ def ambiguous_in(question):
 
 #: 이름 토막을 뽑을 때 쓰는 토큰. 뒤에 붙는 조사는 떼고 본다.
 _TOKEN = _re.compile(r"[가-힣A-Za-z0-9&.]+")
-_JOSA = ("에서의", "으로의", "에서", "으로", "이의", "의", "은", "는", "이", "가",
-         "을", "를", "에", "와", "과", "도", "만", "라", "야")
+#: ★ 종전에는 9종뿐이라 `하나금융까지`·`포스코부터`·`KAI라는`이 통째로 미탐이었다
+#:   (별칭 21개 × 조사 10종에서 86% 미탐 실측). 긴 것부터 봐야 `에서는`이 `는`에
+#:   가로채이지 않는다.
+_JOSA = tuple(sorted(
+    ("에서의", "에서는", "에서도", "으로의", "으로서", "으로써", "이라는", "이라고",
+     "까지는", "부터는", "한테는", "에게는",
+     "에서", "으로", "이의", "와의", "과의", "에의", "로서", "로써", "까지", "부터",
+     "마저", "조차", "밖에", "한테", "에게", "께서", "라는", "라고", "이란", "처럼",
+     "보다", "마다", "대로", "만큼", "이랑", "하고", "에는", "에도",
+     "의", "은", "는", "이", "가", "을", "를", "에", "와", "과", "도", "만", "라", "야"),
+    key=len, reverse=True))
+
+
+def _bare_tokens(question):
+    """토큰 → (조사 뗀 형태, 원형) 순으로 내놓는다. `corps_in`·`outside_name` 공용.
+
+    ★ **떼기 전 형태도 함께 내는** 이유: 조사 목록에 든 글자로 끝나는 회사명이 있다
+      (`에코프로`의 `로`·`이마트`의 조사 아님 등). 하나만 내면 정상 이름을 깎아
+      미탐이 된다. 둘 다 보면 깎여도 원형이 받아 준다.
+      `outside_name`은 앞에서부터 보므로 **뗀 형태가 먼저**여야 문장이 깨지지 않는다
+      (`LG전자에서는` → payload가 `LG전자`).
+    """
+    for raw in _TOKEN.findall(question or ""):
+        tok = raw
+        for j in _JOSA:
+            if tok.endswith(j) and len(tok) > len(j) + 1:
+                tok = tok[:-len(j)]
+                break
+        if tok != raw:
+            yield tok
+        yield raw
 
 
 def outside_name(question):
@@ -162,12 +202,7 @@ def outside_name(question):
     되물어 **정보한계 고지(평가지표 7)를 잃는다** — `audit.probe` D-5가 그 문항이다.
     """
     idx = _store._corp_index()
-    for raw in _TOKEN.findall(question or ""):
-        tok = raw
-        for j in _JOSA:                      # 조사를 떼고 본다(`LG전자의` → `LG전자`)
-            if tok.endswith(j) and len(tok) > len(j) + 1:
-                tok = tok[:-len(j)]
-                break
+    for tok in _bare_tokens(question):       # 조사를 떼고 본다(`LG전자의` → `LG전자`)
         k = _store._norm(tok)
         if k in idx or len(k) < 3:
             continue
@@ -258,12 +293,26 @@ def message(reason, payload=None, question=""):
                 + "\n".join(parts)
                 + "\n\n정확한 회사명을 함께 알려주시면 공시에서 찾아 답변드리겠습니다.")
     if reason == "outside_corp":
-        # ★ `DENIAL` 어휘("코퍼스에 … 없")를 그대로 쓴다 — 우리가 내보내는 부재 고지를
-        #   채점기·probe 가 못 알아보면 정답을 벌준다(이 저장소가 세 번 반복한 실수).
-        return (f"'{payload}'는 제공된 공시 코퍼스에 없는 기업입니다.\n"
+        # ★ `DENIAL` 어휘("찾을 수 없" · "포함되어 있지 않")를 그대로 쓴다 — 우리가
+        #   내보내는 부재 고지를 채점기·probe 가 못 알아보면 정답을 벌준다.
+        #
+        # ★★ 종전에는 `'{X}'는 코퍼스에 없는 기업입니다`라고 **단정**했다. 그런데 이
+        #   경로에는 코퍼스 밖 회사(`LG전자`)와 코퍼스 안 회사의 미등록 표기(`LG엔솔`·
+        #   `두산중공업`)가 **함께** 들어오고 코드는 둘을 구분하지 못한다. 단정도 답변이고
+        #   후자에 대해서는 거짓이었다. 그래서 부재는 **조건절로** 밝히고 같은 접두의
+        #   후보를 함께 준다 — 부재 고지는 유지하면서 거짓 단정만 없앤다.
+        cand = max((k for k in AMBIGUOUS if _store._norm(payload or "").startswith(k)),
+                   key=len, default=None)
+        who = ""
+        if cand:
+            names = AMBIGUOUS[cand]
+            who = (f"'{cand}'로 시작하는 회사는 코퍼스에 {len(names)}개사가 있습니다 — "
+                   f"{' · '.join(names)}\n")
+        return (f"'{payload}'로 해소되는 회사를 제공 코퍼스 70개사에서 찾을 수 없습니다.\n"
+                + who +
                 "코퍼스는 국내 상장사 70개사의 2023년 1월 ~ 2026년 6월 공시로 한정됩니다.\n\n"
-                "코퍼스에 포함된 회사에 대한 질문이라면 정확한 회사명을 알려주시면 "
-                "공시에서 찾아 답변드리겠습니다.")
+                "이 중 한 곳을 말씀하신 것이라면 정확한 회사명을 알려주시면 공시에서 찾아 "
+                "답변드리겠습니다. 그 밖의 회사라면 코퍼스에 포함되어 있지 않습니다.")
     if reason == "no_corp":
         return ("어느 회사에 대한 질문인지 확인되지 않아 답변을 드릴 수 없습니다.\n"
                 "제공된 공시 코퍼스는 국내 상장사 70개사의 2023년 1월 ~ 2026년 6월 공시로 "
