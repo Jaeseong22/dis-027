@@ -1,5 +1,6 @@
 """근거 가드 — 답변을 원자 클레임으로 쪼개 근거와 대조하고, 지지되지 않으면 막는다."""
 import re
+from functools import lru_cache as _lru_cache
 from collections import namedtuple
 
 #: `step`은 **답변에 적힌 표시 정밀도**(정수면 1.0 · 소수 한 자리면 0.1)다.
@@ -281,6 +282,33 @@ _ANS_SECTION = re.compile(r"\s*[,·]?\s*(?:section|섹션)\s*[:：]\s*([^),\n]{1
 _OBS_SECTION = re.compile(r"""['"]?(?:section|섹션)['"]?\s*[:：]\s*['"]?([^'"\n,}]{2,200})""")
 
 
+#: ⑤ 내부 도구 이름 — 사용자는 도구를 부를 수 없다. 실측으로 두 갈래로 샌다:
+#:   A `(근거: list_filings, 계수)` — SYSTEM 규칙 10이 요구한 **출처** 자리에 도구
+#:     이름이 들어갔다. 문장에 근거가 실려 있으므로 **이름만 뗀다**.
+#:   B `find_tables 혹은 find_sections 도구를 사용하여 … 권장드립니다` — 사용자에게
+#:     떠넘긴다. 그 문장에는 근거가 없으므로 **문장째 덜어낸다**.
+#: 사전을 여기 적지 않고 레지스트리에서 가져온다 — 도구가 바뀌면 같이 바뀌어야 한다.
+_EVIDENCE = re.compile(r"근거|출처|접수번호")
+
+
+@_lru_cache(maxsize=1)
+def _tool_word():
+    """등록된 도구 이름 정규식. 지연 로드 — `agent2.tools` 초기화가 끝나야 채워진다."""
+    from agent2.tools.registry import all_tools
+    names = sorted((t.name for t in all_tools()), key=len, reverse=True)
+    if not names:
+        return None
+    return re.compile(r"\b(?:" + "|".join(re.escape(n) for n in names) + r")\b")
+
+
+def _tidy_evidence(sent):
+    """도구 이름을 뗀 자리에 남는 빈 구분자를 정리한다."""
+    out = re.sub(r"\(\s*근거\s*[:：]\s*[,·、\s]*", "(근거: ", sent)
+    out = re.sub(r"[,·]\s*(?=[,·)])", "", out)
+    out = re.sub(r"\(\s*근거\s*[:：]\s*\)", "", out)      # 남은 게 없으면 괄호째 지운다
+    return re.sub(r"[ \t]{2,}", " ", out).strip()
+
+
 def drop_fake_section(answer, context):
     """관측의 `section` 값이 아닌 `section: X` 구절을 뗀다. (정리된 답변, 뗀 것)."""
     if not answer or not _ANS_SECTION.search(answer):
@@ -317,6 +345,7 @@ def hygiene(answer):
     if n_bare:
         removed.append(f"URL {n_bare}건")
         out = _BARE_URL.sub(" ", out)   # 앞뒤 어절이 붙지 않게 한 칸 남긴다
+    tw = _tool_word()
     keep = []
     for sent in sentences(out):
         if _SELF_DESC.search(sent):
@@ -325,6 +354,15 @@ def hygiene(answer):
         if _EXT_SERVICE.search(sent):
             removed.append(f"[상용서비스] {sent[:60]}")
             continue
+        if tw is not None and tw.search(sent):
+            if _EVIDENCE.search(sent):          # A — 근거가 실린 문장은 이름만 뗀다
+                removed.append(f"[도구명] {sent[:60]}")
+                sent = _tidy_evidence(tw.sub("", sent))
+                if not sent:
+                    continue
+            else:                                # B — 도구 사용 권유는 문장째 덜어낸다
+                removed.append(f"[도구권유] {sent[:60]}")
+                continue
         keep.append(sent)
     if not removed:
         return answer, []
